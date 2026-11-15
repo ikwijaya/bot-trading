@@ -4,8 +4,8 @@ use serde_json::Value;
 use sha2::Sha256;
 
 use crate::core::domain::{
-    AccountSnapshot, Candle, DomainError, ExchangeCredentialsConfig, ExecutionMode, OrderFill,
-    OrderSide, Position, PositionSide, TradeOrderRequest,
+    AccountSnapshot, Candle, DomainError, ExchangeCredentialsConfig, ExchangeProvider,
+    ExecutionMode, OrderFill, OrderSide, Position, PositionSide, TradeOrderRequest,
 };
 use crate::core::ports::{ClockPort, ExchangePort};
 
@@ -26,16 +26,53 @@ pub fn sign_binance_query(query: &str, secret: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Resolves the Binance USDⓈ-M Futures base URL for the given [`ExecutionMode`].
+/// Resolves the exchange REST base URL for the given [`ExecutionMode`] and [`ExchangeProvider`].
 pub fn resolve_binance_base_url(
     mode: ExecutionMode,
     creds_cfg: &ExchangeCredentialsConfig,
 ) -> String {
-    match mode {
-        ExecutionMode::Live => creds_cfg.live_base_url.trim_end_matches('/').to_string(),
-        ExecutionMode::Testnet | ExecutionMode::Paper => {
-            creds_cfg.testnet_base_url.trim_end_matches('/').to_string()
-        }
+    let default_bn_live = "https://fapi.binance.com";
+    let default_bn_test = "https://testnet.binancefuture.com";
+
+    match creds_cfg.provider {
+        ExchangeProvider::Binance => match mode {
+            ExecutionMode::Live => creds_cfg.live_base_url.trim_end_matches('/').to_string(),
+            ExecutionMode::Testnet | ExecutionMode::Paper => {
+                creds_cfg.testnet_base_url.trim_end_matches('/').to_string()
+            }
+        },
+        ExchangeProvider::Bybit => match mode {
+            ExecutionMode::Live => {
+                if creds_cfg.live_base_url == default_bn_live {
+                    "https://api.bybit.com".to_string()
+                } else {
+                    creds_cfg.live_base_url.trim_end_matches('/').to_string()
+                }
+            }
+            ExecutionMode::Testnet | ExecutionMode::Paper => {
+                if creds_cfg.testnet_base_url == default_bn_test {
+                    "https://api-testnet.bybit.com".to_string()
+                } else {
+                    creds_cfg.testnet_base_url.trim_end_matches('/').to_string()
+                }
+            }
+        },
+        ExchangeProvider::Okx => match mode {
+            ExecutionMode::Live => {
+                if creds_cfg.live_base_url == default_bn_live {
+                    "https://www.okx.com".to_string()
+                } else {
+                    creds_cfg.live_base_url.trim_end_matches('/').to_string()
+                }
+            }
+            ExecutionMode::Testnet | ExecutionMode::Paper => {
+                if creds_cfg.testnet_base_url == default_bn_test {
+                    "https://www.okx.com".to_string()
+                } else {
+                    creds_cfg.testnet_base_url.trim_end_matches('/').to_string()
+                }
+            }
+        },
     }
 }
 
@@ -92,6 +129,93 @@ pub fn parse_binance_klines_json(raw: &Value) -> Result<Vec<Candle>, DomainError
         });
     }
 
+    Ok(candles)
+}
+
+/// Parses Bybit V5 `/v5/market/kline` JSON payload (`result.list`) into chronological [`Candle`] items.
+pub fn parse_bybit_klines_json(raw: &Value) -> Result<Vec<Candle>, DomainError> {
+    let rows = raw["result"]["list"]
+        .as_array()
+        .ok_or_else(|| DomainError::ExchangeError {
+            message: "expected JSON array at result.list from Bybit /v5/market/kline".to_string(),
+        })?;
+
+    let mut candles = Vec::with_capacity(rows.len());
+    for row in rows {
+        let items = row.as_array().ok_or_else(|| DomainError::ExchangeError {
+            message: "expected Bybit kline row to be an array".to_string(),
+        })?;
+        if items.len() < 6 {
+            return Err(DomainError::ExchangeError {
+                message: format!("Bybit kline row has fewer than 6 items: {}", items.len()),
+            });
+        }
+        let open_time = items[0]
+            .as_str()
+            .and_then(|s| s.parse::<i64>().ok())
+            .or_else(|| items[0].as_i64())
+            .unwrap_or(0);
+        let open = parse_json_f64(&items[1], "open")?;
+        let high = parse_json_f64(&items[2], "high")?;
+        let low = parse_json_f64(&items[3], "low")?;
+        let close = parse_json_f64(&items[4], "close")?;
+        let volume = parse_json_f64(&items[5], "volume")?;
+
+        candles.push(Candle {
+            open_time,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            close_time: open_time + 60_000,
+        });
+    }
+    // Bybit returns newest first; sort ascending by open_time
+    candles.sort_by_key(|c| c.open_time);
+    Ok(candles)
+}
+
+/// Parses OKX V5 `/api/v5/market/candles` JSON payload (`data`) into chronological [`Candle`] items.
+pub fn parse_okx_klines_json(raw: &Value) -> Result<Vec<Candle>, DomainError> {
+    let rows = raw["data"]
+        .as_array()
+        .ok_or_else(|| DomainError::ExchangeError {
+            message: "expected JSON array at data from OKX /api/v5/market/candles".to_string(),
+        })?;
+
+    let mut candles = Vec::with_capacity(rows.len());
+    for row in rows {
+        let items = row.as_array().ok_or_else(|| DomainError::ExchangeError {
+            message: "expected OKX candle row to be an array".to_string(),
+        })?;
+        if items.len() < 6 {
+            return Err(DomainError::ExchangeError {
+                message: format!("OKX candle row has fewer than 6 items: {}", items.len()),
+            });
+        }
+        let open_time = items[0]
+            .as_str()
+            .and_then(|s| s.parse::<i64>().ok())
+            .or_else(|| items[0].as_i64())
+            .unwrap_or(0);
+        let open = parse_json_f64(&items[1], "open")?;
+        let high = parse_json_f64(&items[2], "high")?;
+        let low = parse_json_f64(&items[3], "low")?;
+        let close = parse_json_f64(&items[4], "close")?;
+        let volume = parse_json_f64(&items[5], "volume")?;
+
+        candles.push(Candle {
+            open_time,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            close_time: open_time + 60_000,
+        });
+    }
+    candles.sort_by_key(|c| c.open_time);
     Ok(candles)
 }
 
@@ -165,9 +289,10 @@ fn parse_json_f64(val: &Value, field_name: &str) -> Result<f64, DomainError> {
     })
 }
 
-/// Concrete Binance USDⓈ-M Futures HTTP REST client adapter.
+/// Concrete Multi-Exchange Futures HTTP REST client adapter (`Binance`, `Bybit`, `OKX`).
 pub struct BinanceFuturesClient<C> {
     http: reqwest::Client,
+    provider: ExchangeProvider,
     base_url: String,
     api_key: String,
     api_secret: String,
@@ -176,7 +301,7 @@ pub struct BinanceFuturesClient<C> {
 }
 
 impl<C: ClockPort> BinanceFuturesClient<C> {
-    /// Creates a new Binance USDⓈ-M Futures client.
+    /// Creates a new Futures client (defaults to [`ExchangeProvider::Binance`]).
     pub fn new(
         base_url: String,
         api_key: String,
@@ -190,6 +315,7 @@ impl<C: ClockPort> BinanceFuturesClient<C> {
             .unwrap_or_default();
         Self {
             http,
+            provider: ExchangeProvider::Binance,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             api_secret,
@@ -198,10 +324,19 @@ impl<C: ClockPort> BinanceFuturesClient<C> {
         }
     }
 
+    /// Sets the target [`ExchangeProvider`] (`Binance`, `Bybit`, or `Okx`).
+    pub fn with_provider(mut self, provider: ExchangeProvider) -> Self {
+        self.provider = provider;
+        self
+    }
+
     fn ensure_credentials(&self) -> Result<(), DomainError> {
         if self.api_key.trim().is_empty() || self.api_secret.trim().is_empty() {
             return Err(DomainError::ExchangeError {
-                message: "Binance API key/secret not configured in environment".to_string(),
+                message: format!(
+                    "{} API key/secret not configured in environment",
+                    self.provider
+                ),
             });
         }
         Ok(())
@@ -216,13 +351,46 @@ impl<C: ClockPort> ExchangePort for BinanceFuturesClient<C> {
         interval: &str,
         limit: usize,
     ) -> Result<Vec<Candle>, DomainError> {
-        let url = format!(
-            "{}/fapi/v1/klines?symbol={}&interval={}&limit={}",
-            self.base_url,
-            symbol.to_uppercase(),
-            interval,
-            limit
-        );
+        let url = match self.provider {
+            ExchangeProvider::Binance => format!(
+                "{}/fapi/v1/klines?symbol={}&interval={}&limit={}",
+                self.base_url,
+                symbol.to_uppercase(),
+                interval,
+                limit
+            ),
+            ExchangeProvider::Bybit => {
+                let bybit_interval = match interval {
+                    "1m" => "1",
+                    "5m" => "5",
+                    "15m" => "15",
+                    "1h" => "60",
+                    "4h" => "240",
+                    "1d" => "D",
+                    other => other,
+                };
+                format!(
+                    "{}/v5/market/kline?category=linear&symbol={}&interval={}&limit={}",
+                    self.base_url,
+                    symbol.to_uppercase(),
+                    bybit_interval,
+                    limit
+                )
+            }
+            ExchangeProvider::Okx => {
+                let okx_inst = if symbol.contains('-') {
+                    symbol.to_uppercase()
+                } else if let Some(base) = symbol.to_uppercase().strip_suffix("USDT") {
+                    format!("{}-USDT-SWAP", base)
+                } else {
+                    symbol.to_uppercase()
+                };
+                format!(
+                    "{}/api/v5/market/candles?instId={}&bar={}&limit={}",
+                    self.base_url, okx_inst, interval, limit
+                )
+            }
+        };
         let resp = self
             .http
             .get(&url)
@@ -239,11 +407,15 @@ impl<C: ClockPort> ExchangePort for BinanceFuturesClient<C> {
 
         if !status.is_success() {
             return Err(DomainError::ExchangeError {
-                message: format!("Binance klines HTTP {}: {}", status, body),
+                message: format!("{} klines HTTP {}: {}", self.provider, status, body),
             });
         }
 
-        parse_binance_klines_json(&body)
+        match self.provider {
+            ExchangeProvider::Binance => parse_binance_klines_json(&body),
+            ExchangeProvider::Bybit => parse_bybit_klines_json(&body),
+            ExchangeProvider::Okx => parse_okx_klines_json(&body),
+        }
     }
 
     async fn fetch_account(&self, symbol: &str) -> Result<AccountSnapshot, DomainError> {
@@ -586,5 +758,51 @@ mod tests {
         };
         assert!(client.place_order(&req).await.is_err());
         assert!(client.fetch_klines("BTCUSDT", "5m", 10).await.is_err());
+    }
+
+    #[test]
+    fn should_resolve_multi_exchange_urls_and_parse_bybit_and_okx_klines() {
+        let mut cfg = ExchangeCredentialsConfig::default();
+        cfg.provider = ExchangeProvider::Bybit;
+        assert_eq!(
+            resolve_binance_base_url(ExecutionMode::Live, &cfg),
+            "https://api.bybit.com"
+        );
+        assert_eq!(
+            resolve_binance_base_url(ExecutionMode::Testnet, &cfg),
+            "https://api-testnet.bybit.com"
+        );
+
+        cfg.provider = ExchangeProvider::Okx;
+        assert_eq!(
+            resolve_binance_base_url(ExecutionMode::Live, &cfg),
+            "https://www.okx.com"
+        );
+
+        let bybit_raw = json!({
+            "retCode": 0,
+            "result": {
+                "list": [
+                    ["1700000300000", "65100.0", "65300.0", "65000.0", "65250.0", "45.5"],
+                    ["1700000000000", "65000.0", "65200.0", "64900.0", "65100.0", "38.2"]
+                ]
+            }
+        });
+        let bybit_candles = parse_bybit_klines_json(&bybit_raw).unwrap();
+        assert_eq!(bybit_candles.len(), 2);
+        assert_eq!(bybit_candles[0].open_time, 1700000000000);
+        assert!((bybit_candles[1].close - 65250.0).abs() < 1e-6);
+
+        let okx_raw = json!({
+            "code": "0",
+            "data": [
+                ["1700000300000", "3500.0", "3550.0", "3490.0", "3540.0", "120.0"],
+                ["1700000000000", "3480.0", "3510.0", "3470.0", "3500.0", "95.0"]
+            ]
+        });
+        let okx_candles = parse_okx_klines_json(&okx_raw).unwrap();
+        assert_eq!(okx_candles.len(), 2);
+        assert_eq!(okx_candles[0].open_time, 1700000000000);
+        assert!((okx_candles[1].close - 3540.0).abs() < 1e-6);
     }
 }

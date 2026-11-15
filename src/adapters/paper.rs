@@ -19,12 +19,12 @@ pub fn generate_synthetic_candles(limit: usize, now_ms: i64) -> Vec<Candle> {
     (0..count)
         .map(|i| {
             let pullbacks = (i / 3) as f64;
-            let base = 65_000.0 + (i as f64) * 30.0 - pullbacks * 45.0;
+            let base = 65_000.0 + (i as f64) * 30.0 - pullbacks * 55.0;
             let wave = if i % 3 == 1 { -25.0 } else { 20.0 };
             let close = base + wave;
             let open = close - 12.0;
-            let high = close + 45.0;
-            let low = close - 45.0;
+            let high = close + 120.0;
+            let low = close - 120.0;
             let open_time = start_ms + (i as i64) * step_ms;
             Candle {
                 open_time,

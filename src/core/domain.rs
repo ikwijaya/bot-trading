@@ -28,6 +28,9 @@ pub enum DomainError {
 
     #[error("daemon process error: {message}")]
     DaemonError { message: String },
+
+    #[error("notification service error: {message}")]
+    NotificationError { message: String },
 }
 
 /// Execution environment mode for the trading bot.
@@ -206,6 +209,84 @@ pub struct AccountSnapshot {
     pub positions: Vec<Position>,
 }
 
+/// Policy governing how the bot executes a valid entry signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionPolicy {
+    /// Automatically execute order immediately when signal & probability checks pass.
+    #[default]
+    Auto,
+    /// Hold order as a pending proposal and notify via Telegram/CLI; execute only after `/approve`.
+    ConfirmByChat,
+    /// Skip all order executions (monitor/analysis only).
+    Skip,
+}
+
+impl std::fmt::Display for DecisionPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecisionPolicy::Auto => write!(f, "auto"),
+            DecisionPolicy::ConfirmByChat => write!(f, "confirm_by_chat"),
+            DecisionPolicy::Skip => write!(f, "skip"),
+        }
+    }
+}
+
+/// Position sizing mode determining how order notional USDT is calculated and bounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SizingMode {
+    /// Size proportionally using Half-Kelly & Expected Value (EV) probability edge.
+    #[default]
+    ProbabilityEv,
+    /// Size based on `risk_per_trade_pct` and Stop-Loss distance.
+    RiskPct,
+    /// Allocate maximum affordable notional allowed by available balance, leverage, and `max_order_usdt`.
+    MaxBalance,
+    /// Allocate fixed minimum notional (`min_order_usdt`).
+    FixedMin,
+}
+
+impl std::fmt::Display for SizingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SizingMode::ProbabilityEv => write!(f, "probability_ev"),
+            SizingMode::RiskPct => write!(f, "risk_pct"),
+            SizingMode::MaxBalance => write!(f, "max_balance"),
+            SizingMode::FixedMin => write!(f, "fixed_min"),
+        }
+    }
+}
+
+/// Mathematical probability and Expected Value (EV) evaluation for a candidate trade.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProbabilityAssessment {
+    pub win_probability: f64,
+    pub break_even_win_rate: f64,
+    pub net_reward_to_risk: f64,
+    pub expected_value_r: f64,
+    pub half_kelly_fraction: f64,
+    pub is_positive_ev: bool,
+}
+
+/// Pending order proposal held when `decision_policy = "confirm_by_chat"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingOrderProposal {
+    pub request: TradeOrderRequest,
+    pub notional_usdt: f64,
+    pub probability: ProbabilityAssessment,
+    pub reason: String,
+    pub created_at_ms: i64,
+}
+
+fn default_min_order_usdt() -> f64 {
+    10.0
+}
+
+fn default_require_positive_ev() -> bool {
+    true
+}
+
 /// Strategy indicator parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrategyConfig {
@@ -216,6 +297,8 @@ pub struct StrategyConfig {
     pub rsi_oversold: f64,
     pub atr_period: usize,
     pub min_confidence: f64,
+    #[serde(default)]
+    pub decision_policy: DecisionPolicy,
 }
 
 impl Default for StrategyConfig {
@@ -228,6 +311,7 @@ impl Default for StrategyConfig {
             rsi_oversold: 30.0,
             atr_period: 14,
             min_confidence: 0.60,
+            decision_policy: DecisionPolicy::Auto,
         }
     }
 }
@@ -243,6 +327,14 @@ pub struct RiskConfig {
     pub max_daily_drawdown_pct: f64,
     pub max_open_positions: usize,
     pub initial_paper_balance_usdt: f64,
+    #[serde(default)]
+    pub sizing_mode: SizingMode,
+    #[serde(default = "default_min_order_usdt")]
+    pub min_order_usdt: f64,
+    #[serde(default)]
+    pub max_order_usdt: f64,
+    #[serde(default = "default_require_positive_ev")]
+    pub require_positive_ev: bool,
 }
 
 impl Default for RiskConfig {
@@ -256,6 +348,10 @@ impl Default for RiskConfig {
             max_daily_drawdown_pct: 0.05,
             max_open_positions: 1,
             initial_paper_balance_usdt: 1_000.0,
+            sizing_mode: SizingMode::ProbabilityEv,
+            min_order_usdt: 10.0,
+            max_order_usdt: 0.0,
+            require_positive_ev: true,
         }
     }
 }
@@ -282,9 +378,31 @@ impl Default for AiConfig {
     }
 }
 
-/// Exchange environment variable names and endpoints.
+/// Supported futures exchange providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ExchangeProvider {
+    #[default]
+    Binance,
+    Bybit,
+    Okx,
+}
+
+impl std::fmt::Display for ExchangeProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExchangeProvider::Binance => write!(f, "binance"),
+            ExchangeProvider::Bybit => write!(f, "bybit"),
+            ExchangeProvider::Okx => write!(f, "okx"),
+        }
+    }
+}
+
+/// Exchange environment variable names, provider, and endpoints.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeCredentialsConfig {
+    #[serde(default)]
+    pub provider: ExchangeProvider,
     pub api_key_env: String,
     pub api_secret_env: String,
     pub testnet_base_url: String,
@@ -295,11 +413,38 @@ pub struct ExchangeCredentialsConfig {
 impl Default for ExchangeCredentialsConfig {
     fn default() -> Self {
         Self {
+            provider: ExchangeProvider::Binance,
             api_key_env: "BINANCE_API_KEY".to_string(),
             api_secret_env: "BINANCE_API_SECRET".to_string(),
             testnet_base_url: "https://testnet.binancefuture.com".to_string(),
             live_base_url: "https://fapi.binance.com".to_string(),
             recv_window_ms: 5_000,
+        }
+    }
+}
+
+/// Telegram Bot notification and remote command monitoring configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TelegramConfig {
+    pub enabled: bool,
+    pub bot_token_env: String,
+    pub chat_id_env: String,
+    pub api_base_url: String,
+    pub notify_on_trade: bool,
+    pub notify_on_cycle: bool,
+    pub listen_commands: bool,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
+            chat_id_env: "TELEGRAM_CHAT_ID".to_string(),
+            api_base_url: "https://api.telegram.org".to_string(),
+            notify_on_trade: true,
+            notify_on_cycle: false,
+            listen_commands: true,
         }
     }
 }
@@ -317,6 +462,8 @@ pub struct BotConfig {
     pub risk: RiskConfig,
     pub ai: AiConfig,
     pub exchange: ExchangeCredentialsConfig,
+    #[serde(default)]
+    pub telegram: TelegramConfig,
 }
 
 impl Default for BotConfig {
@@ -332,8 +479,32 @@ impl Default for BotConfig {
             risk: RiskConfig::default(),
             ai: AiConfig::default(),
             exchange: ExchangeCredentialsConfig::default(),
+            telegram: TelegramConfig::default(),
         }
     }
+}
+
+/// Accumulated continuous-learning context and auto-generated trading skills knowledge base.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SkillKnowledgeBase {
+    pub total_cycles: u64,
+    pub bullish_cycles: u64,
+    pub bearish_cycles: u64,
+    pub winning_closes: u64,
+    pub losing_closes: u64,
+    pub cumulative_ev_r: f64,
+    pub positive_ev_signals: u64,
+    pub learned_rules: Vec<String>,
+    pub recent_ai_insights: Vec<String>,
+    pub last_updated_ms: i64,
+}
+
+/// Single validation checklist item produced when verifying configuration requirements.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigCheckItem {
+    pub field: String,
+    pub passed: bool,
+    pub message: String,
 }
 
 /// Persisted state of the background bot agent.
@@ -352,6 +523,10 @@ pub struct BotState {
     pub open_positions: Vec<Position>,
     pub last_decision: Option<AgentDecision>,
     pub recent_fills: Vec<OrderFill>,
+    #[serde(default)]
+    pub pending_order: Option<PendingOrderProposal>,
+    #[serde(default)]
+    pub skill_knowledge: SkillKnowledgeBase,
 }
 
 impl BotState {
@@ -372,6 +547,8 @@ impl BotState {
             open_positions: Vec::new(),
             last_decision: None,
             recent_fills: Vec::new(),
+            pending_order: None,
+            skill_knowledge: SkillKnowledgeBase::default(),
         }
     }
 }
@@ -386,4 +563,8 @@ pub struct CycleReport {
     pub decision: AgentDecision,
     pub executed_order: Option<OrderFill>,
     pub closed_positions: usize,
+    #[serde(default)]
+    pub pending_order: Option<PendingOrderProposal>,
+    #[serde(default)]
+    pub probability: Option<ProbabilityAssessment>,
 }

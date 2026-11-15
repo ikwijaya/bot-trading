@@ -129,6 +129,8 @@ pub fn spawn_background_daemon(
     let child = Command::new(exe_path)
         .arg("--config")
         .arg(config_path)
+        .arg("--worker-id")
+        .arg(store.worker_id())
         .arg("run-worker")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))

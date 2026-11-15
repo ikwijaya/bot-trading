@@ -1,10 +1,14 @@
 use crate::core::domain::{
-    AccountSnapshot, AgentDecision, AiAssessment, BotConfig, BotState, CycleReport, DomainError,
-    OrderFill, PositionSide, SignalAction, TechnicalSignal, TradeOrderRequest,
+    AccountSnapshot, AgentDecision, AiAssessment, BotConfig, BotState, CycleReport, DecisionPolicy,
+    DomainError, OrderFill, PendingOrderProposal, PositionSide, ProbabilityAssessment,
+    SignalAction, SkillKnowledgeBase, TechnicalSignal, TradeOrderRequest,
 };
 use crate::core::indicators::evaluate_technical_snapshot;
 use crate::core::ports::{AiAdvisorPort, ClockPort, ExchangePort, StateStorePort};
-use crate::core::risk::{calculate_position_size, compute_sl_tp_prices, validate_risk_limits};
+use crate::core::risk::{
+    calculate_position_size_with_policy, compute_sl_tp_prices, evaluate_trade_probability,
+    validate_risk_limits,
+};
 
 /// Pure function that combines a rule-based [`TechnicalSignal`] with an optional [`AiAssessment`].
 ///
@@ -81,6 +85,159 @@ pub fn combine_signals(
     }
 }
 
+/// Pure function that updates the continuous-learning [`SkillKnowledgeBase`] after each cycle.
+pub fn update_skill_knowledge(
+    kb: &mut SkillKnowledgeBase,
+    technical: &TechnicalSignal,
+    ai: Option<&AiAssessment>,
+    prob: Option<&ProbabilityAssessment>,
+    closed_fills: &[OrderFill],
+    now_ms: i64,
+) {
+    kb.total_cycles += 1;
+    kb.last_updated_ms = now_ms;
+
+    if technical.fast_ema > technical.slow_ema {
+        kb.bullish_cycles += 1;
+    } else if technical.fast_ema < technical.slow_ema {
+        kb.bearish_cycles += 1;
+    }
+
+    for fill in closed_fills {
+        if fill.realized_pnl >= 0.0 {
+            kb.winning_closes += 1;
+        } else {
+            kb.losing_closes += 1;
+        }
+    }
+
+    if let Some(p) = prob {
+        if p.is_positive_ev {
+            kb.positive_ev_signals += 1;
+            kb.cumulative_ev_r += p.expected_value_r;
+        }
+    }
+
+    if let Some(a) = ai {
+        kb.recent_ai_insights.push(format!(
+            "[{:?} conf={:.0}%] {}",
+            a.action,
+            a.confidence * 100.0,
+            a.reasoning
+        ));
+        if kb.recent_ai_insights.len() > 5 {
+            let excess = kb.recent_ai_insights.len() - 5;
+            kb.recent_ai_insights.drain(0..excess);
+        }
+    }
+
+    // Re-synthesize adaptive trading rules from accumulated history
+    let mut rules = Vec::new();
+    let regime = if kb.bullish_cycles >= kb.bearish_cycles {
+        "Bullish / Uptrend Dominan"
+    } else {
+        "Bearish / Downtrend Dominan"
+    };
+    rules.push(format!(
+        "Rezim Pasar Terkini: {} (Bullish: {} siklus, Bearish: {} siklus).",
+        regime, kb.bullish_cycles, kb.bearish_cycles
+    ));
+
+    let total_closed = kb.winning_closes + kb.losing_closes;
+    if total_closed > 0 {
+        let win_rate = (kb.winning_closes as f64 / total_closed as f64) * 100.0;
+        if win_rate < 45.0 {
+            rules.push(format!(
+                "Adaptasi Defensif: Realized Win-Rate {:.1}% (<45%) — prioritaskan sinyal dengan Expected Value > +0.30R dan hindari entry dekat batas RSI ekstrem.",
+                win_rate
+            ));
+        } else {
+            rules.push(format!(
+                "Performa Stabil: Realized Win-Rate {:.1}% ({} menang / {} kalah) — pertahankan disiplin Half-Kelly & ATR SL/TP.",
+                win_rate, kb.winning_closes, kb.losing_closes
+            ));
+        }
+    } else {
+        rules.push(
+            "Fase Observasi Awal: Belum ada posisi tertutup; gunakan filter ketat Expected Value > 0 setelah fee 0.08%."
+                .to_string(),
+        );
+    }
+
+    if technical.rsi >= 65.0 {
+        rules.push(format!(
+            "Peringatan Momentum Terakhir: RSI tinggi ({:.1}) — waspadai potensi pullback sebelum membuka LONG baru.",
+            technical.rsi
+        ));
+    } else if technical.rsi <= 35.0 {
+        rules.push(format!(
+            "Peringatan Momentum Terakhir: RSI rendah ({:.1}) — waspadai potensi technical rebound sebelum membuka SHORT baru.",
+            technical.rsi
+        ));
+    }
+
+    kb.learned_rules = rules;
+}
+
+/// Pure function that renders the accumulated [`SkillKnowledgeBase`] and [`BotState`] into a human- & LLM-readable `skills.md` document.
+pub fn format_skills_markdown(
+    symbol: &str,
+    kb: &SkillKnowledgeBase,
+    state: &BotState,
+) -> String {
+    let total_closed = kb.winning_closes + kb.losing_closes;
+    let realized_wr = if total_closed > 0 {
+        (kb.winning_closes as f64 / total_closed as f64) * 100.0
+    } else {
+        0.0
+    };
+    let avg_ev = if kb.positive_ev_signals > 0 {
+        kb.cumulative_ev_r / (kb.positive_ev_signals as f64)
+    } else {
+        0.0
+    };
+
+    let mut md = format!(
+        "# 🧠 Trade-Bot Learned Skills & Context (`skills.md`)\n\n\
+         - **Symbol:** `{symbol}` (`{}`)\n\
+         - **Total Siklus Dipelajari:** `{}` siklus (Bullish: `{}`, Bearish: `{}`)\n\
+         - **Rekam Jejak Posisi Tertutup:** `{}` Menang / `{}` Kalah (Win-Rate: `{:.1}%`)\n\
+         - **Rata-Rata Expected Value (+EV):** `{:+.2}R` dari `{}` sinyal valid\n\
+         - **Realized PnL Akumulasi:** `{:+.2} USDT` (Saldo Saat Ini: `{:.2} USDT`)\n\n\
+         ## 1. Aturan & Heuristik yang Dipelajari Bot (`Learned Rules`)\n",
+        state.mode,
+        kb.total_cycles,
+        kb.bullish_cycles,
+        kb.bearish_cycles,
+        kb.winning_closes,
+        kb.losing_closes,
+        realized_wr,
+        avg_ev,
+        kb.positive_ev_signals,
+        state.realized_pnl_usdt,
+        state.current_balance_usdt
+    );
+
+    if kb.learned_rules.is_empty() {
+        md.push_str("- Belum ada aturan adaptif yang terbentuk.\n");
+    } else {
+        for (i, rule) in kb.learned_rules.iter().enumerate() {
+            md.push_str(&format!("{}. {}\n", i + 1, rule));
+        }
+    }
+
+    md.push_str("\n## 2. Memori Insight AI Terakhir (`Recent AI Context`)\n");
+    if kb.recent_ai_insights.is_empty() {
+        md.push_str("- *(Modul AI belum memiliki catatan insight baru atau `ai.enabled = false`)*\n");
+    } else {
+        for insight in &kb.recent_ai_insights {
+            md.push_str(&format!("- {}\n", insight));
+        }
+    }
+
+    md
+}
+
 /// Core orchestrator for the Hybrid Trading Agent, parameterized over injected I/O ports.
 pub struct AgentEngine<E, A, S, C> {
     exchange: E,
@@ -139,6 +296,7 @@ where
         );
 
         let mut closed_positions = 0usize;
+        let mut closed_fills_vec = Vec::new();
         let has_opposite_position = account.positions.iter().any(|pos| {
             (pos.side == PositionSide::Long && decision.action == SignalAction::Short)
                 || (pos.side == PositionSide::Short && decision.action == SignalAction::Long)
@@ -152,12 +310,15 @@ where
             for fill in close_fills {
                 state.realized_pnl_usdt += fill.realized_pnl;
                 state.total_trades += 1;
+                closed_fills_vec.push(fill.clone());
                 state.recent_fills.push(fill);
             }
             account = self.exchange.fetch_account(&cfg.symbol).await?;
         }
 
         let mut executed_order: Option<OrderFill> = None;
+        let mut pending_order: Option<PendingOrderProposal> = None;
+        let mut probability: Option<ProbabilityAssessment> = None;
         let target_side = match decision.action {
             SignalAction::Long => Some(PositionSide::Long),
             SignalAction::Short => Some(PositionSide::Short),
@@ -165,48 +326,84 @@ where
         };
 
         if let Some(pos_side) = target_side {
-            if validate_risk_limits(&state, &account, &cfg.risk).is_ok() {
+            if cfg.strategy.decision_policy != DecisionPolicy::Skip
+                && validate_risk_limits(&state, &account, &cfg.risk).is_ok()
+            {
                 let (sl, tp) = compute_sl_tp_prices(
                     technical.last_price,
                     technical.atr,
                     pos_side,
                     &cfg.risk,
                 )?;
-                let sizing = calculate_position_size(
-                    account.available_balance,
+                if let Ok(prob) = evaluate_trade_probability(
+                    decision.confidence,
                     technical.last_price,
                     sl,
-                    &cfg.risk,
-                )?;
+                    tp,
+                    cfg.risk.require_positive_ev,
+                ) {
+                    probability = Some(prob.clone());
+                    if let Ok(sizing) = calculate_position_size_with_policy(
+                        account.available_balance,
+                        technical.last_price,
+                        sl,
+                        &prob,
+                        &cfg.risk,
+                    ) {
+                        let req = TradeOrderRequest {
+                            symbol: cfg.symbol.clone(),
+                            side: pos_side.entry_order_side(),
+                            position_side: pos_side,
+                            quantity: sizing.quantity,
+                            entry_price: technical.last_price,
+                            stop_loss: Some(sl),
+                            take_profit: Some(tp),
+                            leverage: sizing.leverage,
+                            reduce_only: false,
+                        };
 
-                self.exchange
-                    .set_leverage(&cfg.symbol, sizing.leverage)
-                    .await?;
-
-                let req = TradeOrderRequest {
-                    symbol: cfg.symbol.clone(),
-                    side: pos_side.entry_order_side(),
-                    position_side: pos_side,
-                    quantity: sizing.quantity,
-                    entry_price: technical.last_price,
-                    stop_loss: Some(sl),
-                    take_profit: Some(tp),
-                    leverage: sizing.leverage,
-                    reduce_only: false,
-                };
-
-                let fill = self.exchange.place_order(&req).await?;
-                state.total_trades += 1;
-                state.recent_fills.push(fill.clone());
-                if state.recent_fills.len() > 50 {
-                    let excess = state.recent_fills.len() - 50;
-                    state.recent_fills.drain(0..excess);
+                        match cfg.strategy.decision_policy {
+                            DecisionPolicy::Auto => {
+                                self.exchange
+                                    .set_leverage(&cfg.symbol, sizing.leverage)
+                                    .await?;
+                                let fill = self.exchange.place_order(&req).await?;
+                                state.total_trades += 1;
+                                state.pending_order = None;
+                                state.recent_fills.push(fill.clone());
+                                if state.recent_fills.len() > 50 {
+                                    let excess = state.recent_fills.len() - 50;
+                                    state.recent_fills.drain(0..excess);
+                                }
+                                executed_order = Some(fill);
+                                account = self.exchange.fetch_account(&cfg.symbol).await?;
+                            }
+                            DecisionPolicy::ConfirmByChat => {
+                                let proposal = PendingOrderProposal {
+                                    request: req,
+                                    notional_usdt: sizing.notional_usdt,
+                                    probability: prob,
+                                    reason: decision.technical_reason.clone(),
+                                    created_at_ms: now_ms,
+                                };
+                                state.pending_order = Some(proposal.clone());
+                                pending_order = Some(proposal);
+                            }
+                            DecisionPolicy::Skip => {}
+                        }
+                    }
                 }
-                executed_order = Some(fill);
-                account = self.exchange.fetch_account(&cfg.symbol).await?;
             }
         }
 
+        update_skill_knowledge(
+            &mut state.skill_knowledge,
+            &technical,
+            ai_assessment.as_ref(),
+            probability.as_ref(),
+            &closed_fills_vec,
+            now_ms,
+        );
         self.sync_state_from_account(&mut state, &account, decision.clone(), now_ms);
         self.state_store.save_state(&state)?;
 
@@ -217,6 +414,8 @@ where
             ai: ai_assessment,
             decision,
             executed_order,
+            pending_order,
+            probability,
             closed_positions,
         })
     }
@@ -485,5 +684,98 @@ mod tests {
         let report = engine.execute_cycle(&cfg).await.unwrap();
         assert_eq!(report.closed_positions, 1);
         assert!(report.executed_order.is_some());
+    }
+
+    #[tokio::test]
+    async fn should_hold_order_in_confirm_by_chat_and_skip_in_skip_policy() {
+        let mut cfg = BotConfig::default();
+        cfg.strategy.fast_ema_period = 3;
+        cfg.strategy.slow_ema_period = 7;
+        cfg.strategy.rsi_period = 5;
+        cfg.strategy.atr_period = 5;
+        cfg.strategy.rsi_overbought = 85.0;
+        cfg.strategy.min_confidence = 0.55;
+        cfg.strategy.decision_policy = DecisionPolicy::ConfirmByChat;
+
+        let exchange = FakeExchange {
+            candles: bullish_candles(),
+            account: Mutex::new(AccountSnapshot {
+                total_wallet_balance: 1_000.0,
+                available_balance: 1_000.0,
+                unrealized_pnl: 0.0,
+                positions: vec![],
+            }),
+        };
+        let state_store = FakeStateStore::default();
+        let engine = AgentEngine::new(
+            exchange,
+            FakeAiAdvisor(None),
+            state_store,
+            FakeClock(1_700_000_000_000),
+        );
+
+        let report = engine.execute_cycle(&cfg).await.unwrap();
+        assert_eq!(report.decision.action, SignalAction::Long);
+        assert!(report.executed_order.is_none());
+        assert!(report.pending_order.is_some());
+        assert!(report.probability.is_some());
+
+        // Now test DecisionPolicy::Skip
+        cfg.strategy.decision_policy = DecisionPolicy::Skip;
+        let report_skip = engine.execute_cycle(&cfg).await.unwrap();
+        assert!(report_skip.executed_order.is_none());
+        assert!(report_skip.pending_order.is_none());
+    }
+
+    #[test]
+    fn should_accumulate_continuous_learning_and_render_skills_markdown() {
+        let cfg = BotConfig::default();
+        let state = BotState::new(&cfg);
+        let mut kb = SkillKnowledgeBase::default();
+        let tech = TechnicalSignal {
+            action: SignalAction::Long,
+            confidence: 0.78,
+            fast_ema: 51_000.0,
+            slow_ema: 50_000.0,
+            rsi: 66.5,
+            atr: 250.0,
+            last_price: 51_200.0,
+            reason: "Uptrend strong".to_string(),
+        };
+        let ai = AiAssessment {
+            action: SignalAction::Long,
+            confidence: 0.85,
+            reasoning: "Orderbook bid wall strong".to_string(),
+        };
+        let prob = ProbabilityAssessment {
+            win_probability: 0.74,
+            break_even_win_rate: 0.35,
+            net_reward_to_risk: 2.0,
+            expected_value_r: 1.14,
+            half_kelly_fraction: 0.25,
+            is_positive_ev: true,
+        };
+        let fill = OrderFill {
+            order_id: "F-1".to_string(),
+            symbol: "BTCUSDT".to_string(),
+            side: OrderSide::Sell,
+            position_side: PositionSide::Long,
+            executed_qty: 0.01,
+            avg_price: 51_500.0,
+            stop_loss: None,
+            take_profit: None,
+            realized_pnl: 15.0,
+            timestamp_ms: 1_700_000_000_000,
+        };
+        update_skill_knowledge(&mut kb, &tech, Some(&ai), Some(&prob), &[fill], 1_700_000_000_000);
+        assert_eq!(kb.total_cycles, 1);
+        assert_eq!(kb.bullish_cycles, 1);
+        assert_eq!(kb.winning_closes, 1);
+        assert!(!kb.learned_rules.is_empty());
+
+        let md = format_skills_markdown("BTCUSDT", &kb, &state);
+        assert!(md.contains("Trade-Bot Learned Skills & Context"));
+        assert!(md.contains("Orderbook bid wall strong"));
+        assert!(md.contains("Performa Stabil"));
     }
 }

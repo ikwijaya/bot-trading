@@ -55,3 +55,10 @@ pub trait StateStorePort: Send + Sync {
     /// Saves the updated bot state atomically.
     fn save_state(&self, state: &BotState) -> Result<(), DomainError>;
 }
+
+/// Notification contract for sending alerts to external channels (e.g. Telegram Bot).
+#[async_trait]
+pub trait NotifierPort: Send + Sync {
+    /// Sends a formatted alert message to the configured recipient.
+    async fn send_notification(&self, message: &str) -> Result<(), DomainError>;
+}

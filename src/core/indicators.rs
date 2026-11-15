@@ -360,6 +360,7 @@ mod tests {
             rsi_oversold: 15.0,
             atr_period: 5,
             min_confidence: 0.60,
+            ..StrategyConfig::default()
         };
 
         // Moderate uptrend with small pullbacks so RSI stays between 45 and 85

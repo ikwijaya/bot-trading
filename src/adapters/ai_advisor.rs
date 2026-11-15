@@ -6,22 +6,36 @@ use crate::core::domain::{
 };
 use crate::core::ports::AiAdvisorPort;
 
-/// Builds a concise structured prompt for an LLM trading advisor.
+/// Builds a concise structured prompt for an LLM trading advisor, including optional learned skills context.
 pub fn build_ai_prompt(
     symbol: &str,
     signal: &TechnicalSignal,
     open_positions: &[Position],
 ) -> String {
+    build_ai_prompt_with_skills(symbol, signal, open_positions, None)
+}
+
+/// Builds a structured prompt for an LLM trading advisor enriched with continuous-learning `skills.md` memory.
+pub fn build_ai_prompt_with_skills(
+    symbol: &str,
+    signal: &TechnicalSignal,
+    open_positions: &[Position],
+    learned_skills: Option<&str>,
+) -> String {
+    let skills_block = match learned_skills.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(skills) => format!("\n--- Continuous Learning Context (skills.md) ---\n{}\n-----------------------------------------------\n", skills),
+        None => String::new(),
+    };
     format!(
-        "You are a quantitative Binance Futures risk & signal advisor.\n\
+        "You are a quantitative Futures risk & signal advisor with continuous memory.\n\
          Symbol: {symbol}\n\
          Last Price: {:.2}\n\
          Fast EMA: {:.2} | Slow EMA: {:.2}\n\
          RSI: {:.1} | ATR: {:.2}\n\
          Technical Signal: {:?} (confidence {:.2}) - {}\n\
-         Active Positions Count: {}\n\
+         Active Positions Count: {}{}\n\
          Respond strictly with a JSON object: \
-         {{\"action\":\"LONG|SHORT|HOLD|CLOSE\",\"confidence\":0.0-1.0,\"reasoning\":\"short explanation\"}}",
+         {{\"action\":\"LONG|SHORT|HOLD|CLOSE\",\"confidence\":0.0-1.0,\"reasoning\":\"short explanation incorporating learned skills\"}}",
         signal.last_price,
         signal.fast_ema,
         signal.slow_ema,
@@ -30,7 +44,8 @@ pub fn build_ai_prompt(
         signal.action,
         signal.confidence,
         signal.reason,
-        open_positions.len()
+        open_positions.len(),
+        skills_block
     )
 }
 
@@ -79,6 +94,7 @@ pub struct HttpAiAdvisor {
     http: reqwest::Client,
     cfg: AiConfig,
     api_key: Option<String>,
+    learned_skills: Option<String>,
 }
 
 impl HttpAiAdvisor {
@@ -88,7 +104,18 @@ impl HttpAiAdvisor {
             .timeout(std::time::Duration::from_secs(12))
             .build()
             .unwrap_or_default();
-        Self { http, cfg, api_key }
+        Self {
+            http,
+            cfg,
+            api_key,
+            learned_skills: None,
+        }
+    }
+
+    /// Attaches the accumulated `skills.md` continuous-learning context to be injected into LLM prompts.
+    pub fn with_learned_skills(mut self, learned_skills: Option<String>) -> Self {
+        self.learned_skills = learned_skills;
+        self
     }
 }
 
@@ -108,7 +135,12 @@ impl AiAdvisorPort for HttpAiAdvisor {
             _ => return Ok(None),
         };
 
-        let prompt = build_ai_prompt(symbol, signal, open_positions);
+        let prompt = build_ai_prompt_with_skills(
+            symbol,
+            signal,
+            open_positions,
+            self.learned_skills.as_deref(),
+        );
         let payload = json!({
             "model": self.cfg.model,
             "temperature": 0.1,
@@ -164,6 +196,11 @@ mod tests {
         let prompt = build_ai_prompt("BTCUSDT", &sig, &[]);
         assert!(prompt.contains("BTCUSDT"));
         assert!(prompt.contains("65300.00"));
+
+        let prompt_with_skills =
+            build_ai_prompt_with_skills("BTCUSDT", &sig, &[], Some("Rule: Avoid RSI > 72"));
+        assert!(prompt_with_skills.contains("Continuous Learning Context"));
+        assert!(prompt_with_skills.contains("Avoid RSI > 72"));
 
         let response = json!({
             "choices": [

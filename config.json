@@ -1,0 +1,47 @@
+{
+  "mode": "paper",
+  "symbol": "BTCUSDT",
+  "interval": "5m",
+  "kline_limit": 100,
+  "poll_interval_secs": 15,
+  "data_dir": ".trade-bot",
+  "strategy": {
+    "decision_policy": "auto",
+    "fast_ema_period": 9,
+    "slow_ema_period": 21,
+    "rsi_period": 14,
+    "rsi_overbought": 70.0,
+    "rsi_oversold": 30.0,
+    "atr_period": 14,
+    "min_confidence": 0.6
+  },
+  "risk": {
+    "sizing_mode": "probability_ev",
+    "min_order_usdt": 15.0,
+    "max_order_usdt": 0.0,
+    "require_positive_ev": true,
+    "leverage": 3,
+    "max_leverage": 10,
+    "risk_per_trade_pct": 0.01,
+    "atr_sl_multiplier": 1.5,
+    "atr_tp_multiplier": 3.0,
+    "max_daily_drawdown_pct": 0.05,
+    "max_open_positions": 1,
+    "initial_paper_balance_usdt": 1000.0
+  },
+  "ai": {
+    "enabled": false,
+    "endpoint_url": "https://api.openai.com/v1/chat/completions",
+    "model": "gpt-4o-mini",
+    "api_key_env": "AI_API_KEY",
+    "weight": 0.35
+  },
+  "exchange": {
+    "provider": "binance",
+    "api_key_env": "BINANCE_API_KEY",
+    "api_secret_env": "BINANCE_API_SECRET",
+    "testnet_base_url": "https://testnet.binancefuture.com",
+    "live_base_url": "https://fapi.binance.com",
+    "recv_window_ms": 5000
+  }
+}
