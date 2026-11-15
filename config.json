@@ -43,5 +43,14 @@
     "testnet_base_url": "https://testnet.binancefuture.com",
     "live_base_url": "https://fapi.binance.com",
     "recv_window_ms": 5000
+  },
+  "telegram": {
+    "enabled": true,
+    "bot_token_env": "TELEGRAM_BOT_TOKEN",
+    "chat_id_env": "TELEGRAM_CHAT_ID",
+    "api_base_url": "https://api.telegram.org",
+    "notify_on_trade": true,
+    "notify_on_cycle": false,
+    "listen_commands": true
   }
 }
