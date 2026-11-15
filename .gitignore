@@ -1,0 +1,6 @@
+/target
+.trade-bot/
+*.profraw
+*.profdata
+config.local.toml
+.env
