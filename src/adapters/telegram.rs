@@ -4,14 +4,15 @@ use serde_json::{json, Value};
 use crate::core::domain::{BotState, CycleReport, DomainError, TelegramConfig};
 use crate::core::ports::NotifierPort;
 
-/// Supported interactive Telegram Bot commands for monitoring and emergency control.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Supported interactive Telegram Bot commands for monitoring, AI Q&A, and emergency control.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TelegramCommand {
     Status,
     Positions,
     Logs,
     Config,
     ActualSkill,
+    Query(String),
     Approve,
     Reject,
     Panic,
@@ -26,7 +27,8 @@ pub struct TelegramUpdate {
     pub text: String,
 }
 
-/// Parses a chat message string into a [`TelegramCommand`], supporting optional `@botname` suffixes.
+/// Parses a chat message string into a [`TelegramCommand`], supporting optional `@botname` suffixes
+/// and free-text arguments for `/query <text>`.
 ///
 /// # Parameters
 /// - `text`: Raw incoming message text from Telegram.
@@ -34,7 +36,8 @@ pub struct TelegramUpdate {
 /// # Returns
 /// `Some(TelegramCommand)` if the message starts with a recognized command, or `None` otherwise.
 pub fn parse_telegram_command(text: &str) -> Option<TelegramCommand> {
-    let first_token = text.split_whitespace().next()?.trim();
+    let trimmed = text.trim();
+    let first_token = trimmed.split_whitespace().next()?.trim();
     if !first_token.starts_with('/') {
         return None;
     }
@@ -43,6 +46,7 @@ pub fn parse_telegram_command(text: &str) -> Option<TelegramCommand> {
         .next()
         .unwrap_or(first_token)
         .to_lowercase();
+    let rest_arg = trimmed[first_token.len()..].trim().to_string();
 
     match cmd_base.as_str() {
         "/status" => Some(TelegramCommand::Status),
@@ -50,6 +54,7 @@ pub fn parse_telegram_command(text: &str) -> Option<TelegramCommand> {
         "/logs" | "/log" => Some(TelegramCommand::Logs),
         "/config" => Some(TelegramCommand::Config),
         "/actual-skill" | "/actual_skill" | "/skills" => Some(TelegramCommand::ActualSkill),
+        "/query" | "/ask" | "/ai" => Some(TelegramCommand::Query(rest_arg)),
         "/approve" | "/buy" => Some(TelegramCommand::Approve),
         "/reject" | "/cancel_order" => Some(TelegramCommand::Reject),
         "/panic" | "/panic_close" => Some(TelegramCommand::Panic),
@@ -170,6 +175,7 @@ pub fn format_telegram_help() -> String {
      /status       - Cek status daemon, saldo USDT, PnL, dan sinyal terakhir\n\
      /positions    - Lihat daftar posisi Futures terbuka & riwayat order fill\n\
      /actual-skill - Lihat hasil pembelajaran AI & aturan adaptif (skills.md)\n\
+     /query <teks> - Tanya langsung ke AI seputar data trading bot, log, & skills\n\
      /approve      - Setujui & eksekusi order yang sedang ditahan (mode confirm_by_chat)\n\
      /reject       - Batalkan order yang sedang ditahan\n\
      /logs         - Lihat 10 baris log terakhir dari daemon\n\
@@ -348,6 +354,18 @@ mod tests {
         assert_eq!(
             parse_telegram_command("/skills"),
             Some(TelegramCommand::ActualSkill)
+        );
+        assert_eq!(
+            parse_telegram_command("/query kenapa belum beli?"),
+            Some(TelegramCommand::Query("kenapa belum beli?".to_string()))
+        );
+        assert_eq!(
+            parse_telegram_command("/ask@MyTradeBot analisa log terakhir"),
+            Some(TelegramCommand::Query("analisa log terakhir".to_string()))
+        );
+        assert_eq!(
+            parse_telegram_command("/query"),
+            Some(TelegramCommand::Query("".to_string()))
         );
         assert_eq!(
             parse_telegram_command("/approve"),

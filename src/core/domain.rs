@@ -356,6 +356,10 @@ impl Default for RiskConfig {
     }
 }
 
+fn default_ai_system_prompt_env() -> String {
+    "AI_SYSTEM_PROMPT".to_string()
+}
+
 /// Optional AI/LLM advisor settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AiConfig {
@@ -363,6 +367,8 @@ pub struct AiConfig {
     pub endpoint_url: String,
     pub model: String,
     pub api_key_env: String,
+    #[serde(default = "default_ai_system_prompt_env")]
+    pub system_prompt_env: String,
     pub weight: f64,
 }
 
@@ -373,6 +379,7 @@ impl Default for AiConfig {
             endpoint_url: "https://api.openai.com/v1/chat/completions".to_string(),
             model: "gpt-4o-mini".to_string(),
             api_key_env: "AI_API_KEY".to_string(),
+            system_prompt_env: default_ai_system_prompt_env(),
             weight: 0.35,
         }
     }

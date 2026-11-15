@@ -198,6 +198,7 @@ Anda juga dapat menampilkan penjelasan seluruh parameter konfigurasi beserta nil
 | `ai.endpoint_url` | `string` | `"https://api.openai.com/v1/chat/completions"` | URL endpoint HTTP Chat Completions (kompatibel dengan OpenAI, OpenRouter, Groq, atau local LLM server). |
 | `ai.model` | `string` | `"gpt-4o-mini"` | Nama model LLM yang dipanggil untuk menganalisis ringkasan indikator teknikal. |
 | `ai.api_key_env` | `string` | `"AI_API_KEY"` | Nama variabel di file `.env` yang menyimpan API Key untuk layanan LLM tersebut. |
+| `ai.system_prompt_env` | `string` | `"AI_SYSTEM_PROMPT"` | Nama variabel di file `.env` yang menyimpan instruksi *System Prompt* kustom untuk asisten tanya jawab `/query`. |
 | `ai.weight` | `f64` | `0.35` | Bobot suara AI (`0.0` s/d `1.0`) saat menggabungkan skor *confidence* teknikal dan AI ($\text{Blended} = (1 - w)\cdot\text{Tech} + w\cdot\text{AI}$). |
 
 ### E. Koneksi Multi-Exchange Futures (`exchange.*`)
@@ -259,6 +260,7 @@ RUST_LOG=info
    - `/status` — Menampilkan status daemon, saldo USDT, PnL, dan sinyal terakhir.
    - `/positions` — Menampilkan daftar posisi Futures terbuka & 5 riwayat order terakhir.
    - `/actual-skill` (atau `/skills`) — Menampilkan dokumen **`skills.md`** berisi hasil pembelajaran berkelanjutan AI & aturan adaptif pasar.
+   - `/query <pertanyaan>` (atau `/ask <pertanyaan>`) — **Tanya langsung ke AI di dalam bot** mengenai kondisi pasar, alasan keputusan bot, isi `skills.md`, posisi terbuka, maupun log daemon terakhir (menggunakan `AI_SYSTEM_PROMPT` di `.env`).
    - `/approve` (atau `/buy`) — Menyetujui & mengeksekusi order yang sedang ditahan (saat `decision_policy = "confirm_by_chat"`).
    - `/reject` — Membatalkan proposal order yang sedang ditahan.
    - `/logs` — Menampilkan 10 baris log terakhir dari daemon.
@@ -292,7 +294,13 @@ RUST_LOG=info
 ./target/release/trade-bot logs -n 50
 ./target/release/trade-bot logs -f
 
-# 6. Melihat hasil pembelajaran AI berkelanjutan (skills.md)
+# 6. Menjalankan Desktop App GUI Visual (atau cukup Double-Click trade-bot.exe tanpa argumen)
+./target/release/trade-bot gui --port 8787
+
+# 7. Tanya langsung ke AI seputar data trading bot, log, & skills (/query)
+./target/release/trade-bot query "kenapa siklus terakhir belum beli?"
+
+# 8. Melihat hasil pembelajaran AI berkelanjutan (skills.md)
 ./target/release/trade-bot actual-skill
 
 # 7. Menjalankan Setup Wizard Interaktif & Mengecek Requirement Config

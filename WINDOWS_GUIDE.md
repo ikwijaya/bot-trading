@@ -143,3 +143,31 @@ Pada setiap siklus evaluasi, bot secara otomatis mempelajari rezim pasar (Bullis
   ```text
   /actual-skill
   ```
+
+---
+
+## 6. Menjalankan Sebagai Desktop App (GUI Visual) & Tanya AI (`/query`)
+
+Aplikasi ini dilengkapi **Built-in Desktop App GUI** tanpa memerlukan instalasi runtime tambahan:
+
+1. **Cara Membuka Desktop App GUI di Windows / macOS / Linux:**
+   - **Cara 1 (Double-Click):** Klik 2x langsung file **`trade-bot.exe`** di Windows Explorer (ketika dijalankan tanpa argumen, aplikasi otomatis menyalakan server lokal `127.0.0.1:8787` dan membuka jendela **Trade-Bot Desktop App**).
+   - **Cara 2 (Lewat Terminal / PowerShell):**
+     ```powershell
+     .\trade-bot.exe gui --port 8787
+     ```
+2. **Fitur di Dalam Desktop App GUI:**
+   - **Tombol 1-Klik:** `▶ Start Daemon`, `⏹ Stop Daemon`, `⚡ Tick Once`, `✅ Approve Pending Order`, `🚫 Reject Pending Order`, dan `🚨 Panic Close`.
+   - **Kotak Tanya AI Langsung (`/query`):** Ketik pertanyaan seputar posisi, alasan belum beli, atau log terakhir langsung dari layar Desktop App.
+   - **Form Editor Konfigurasi & Check-Config:** Ubah Exchange (`binance`/`bybit`/`okx`), Mode, Symbol, Decision Policy, Min/Max USDT, dan simpan langsung ke `config.json` atau `config.db`.
+3. **Tanya AI Langsung dari Telegram (`/query <teks>`):**
+   - Pastikan `"ai": { "enabled": true }` di config dan `AI_API_KEY` (serta opsional `AI_SYSTEM_PROMPT`) sudah diisi di `.env`.
+   - Dari ruang chat Bot Telegram Anda, kirim perintah:
+     ```text
+     /query kenapa siklus terakhir belum beli dan bagaimana kondisi RSI saat ini?
+     ```
+   - Atau dari CLI:
+     ```powershell
+     .\trade-bot.exe query "analisa posisi terbuka dan log terakhir saya"
+     ```
+

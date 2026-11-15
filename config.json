@@ -34,6 +34,7 @@
     "endpoint_url": "https://api.openai.com/v1/chat/completions",
     "model": "gpt-4o-mini",
     "api_key_env": "AI_API_KEY",
+    "system_prompt_env": "AI_SYSTEM_PROMPT",
     "weight": 0.35
   },
   "exchange": {
