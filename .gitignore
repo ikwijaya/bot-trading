@@ -1,7 +1,16 @@
+# Rust build output
 /target
-.trade-bot/
 *.profraw
 *.profdata
+
+# Release artifacts
+/dist
+*.zip
+
+# Local config and secrets
+.trade-bot/
 config.local.toml
 .env
-dist/
+
+# OS
+.DS_Store
