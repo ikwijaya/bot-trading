@@ -249,8 +249,12 @@ RUST_LOG=info
 
 ### Langkah Mudah Menghubungkan ke Bot Telegram:
 1. Buka aplikasi Telegram, cari **`@BotFather`**, lalu kirim perintah `/newbot` untuk membuat bot baru dan salin **Bot Token** ke `TELEGRAM_BOT_TOKEN` di `.env`.
-2. Kirim pesan `/start` ke bot yang baru Anda buat di Telegram.
-3. Cari **`@userinfobot`** di Telegram (atau buka `https://api.telegram.org/bot<TOKEN_ANDA>/getUpdates` di browser setelah mengirim pesan ke bot Anda) untuk mengetahui angka **Chat ID** Anda, lalu isi ke `TELEGRAM_CHAT_ID` di `.env`.
+2. Kirim pesan `/start` ke bot yang baru Anda buat di Telegram (dan jika ingin dipakai di Grup, undang bot ke Grup lalu ketik `/status` di Grup).
+3. Jalankan perintah otomatis berikut untuk langsung mengetahui **Owner ID** dan **Group ID** Anda (atau cek via `@userinfobot`):
+   ```bash
+   ./target/release/trade-bot telegram-whoami
+   ```
+   Salin baris `TELEGRAM_OWNER_ID=...` dan `TELEGRAM_CHAT_ID=...` yang muncul ke dalam file `.env`.
 4. Ubah `"telegram": { "enabled": true }` di `config.json`.
 5. Uji koneksi Telegram langsung dari terminal:
    ```bash
@@ -265,8 +269,27 @@ RUST_LOG=info
    - `/reject` — Membatalkan proposal order yang sedang ditahan.
    - `/logs` — Menampilkan 10 baris log terakhir dari daemon.
    - `/config` — Menampilkan ringkasan konfigurasi aktif.
+   - `/set-config <key> <value>` — Mengubah nilai konfigurasi (hanya diizinkan di **Private Chat oleh Owner Bot**; otomatis ditolak jika dipanggil dari Grup).
    - `/panic` — **Darurat:** Menutup seluruh posisi terbuka secara instan & menghentikan daemon.
    - `/help` — Menampilkan daftar bantuan perintah.
+
+### Menggunakan Bot di Dalam Grup Telegram (Group / Supergroup) + Chat Pribadi Sekaligus:
+1. Masukkan bot Anda ke dalam Grup Telegram, lalu ketik `/status` atau `/status@NamaBotAnda` di dalam grup tersebut.
+2. Cek log bot (`./target/release/trade-bot logs -n 10`) — jika ID Grup belum terdaftar, bot akan menampilkan angka `chat_id` grup Anda (diawali tanda minus `-`, contoh `-100987654321`).
+3. Tambahkan ID Grup tersebut ke `TELEGRAM_CHAT_ID` di `.env` (dipisahkan dengan koma agar Chat Pribadi dan Grup sama-sama aktif):
+   ```dotenv
+   TELEGRAM_CHAT_ID=123456789,-100987654321
+   TELEGRAM_OWNER_ID=123456789
+   ```
+4. **Aturan Keamanan & Privasi (Private Owner vs Group Non-PII):**
+   - **Private Chat (DM) Hanya untuk Owner:** Jika ada akun selain Owner (`TELEGRAM_OWNER_ID`) yang mengirim pesan secara japri/private ke bot, bot **tidak akan menjawab sama sekali** (*silent ignore*).
+   - **Larangan Perubahan Config di Grup:** Perintah `/set-config` atau permintaan ubah config lewat `/query` **dilarang di dalam Grup** dan hanya bisa dilakukan oleh Owner lewat Private Chat.
+   - **Proteksi Data Non-PII di Grup:** Saat menjawab `/status`, `/positions`, `/config`, `/logs`, `/actual-skill`, atau `/query` di dalam Grup, bot otomatis menyensor data pribadi & finansial sensitif (`[REDACTED - NON-PII GROUP MODE]`) seperti nominal saldo dompet USDT pribadi, PnL dolar pribadi, serta path direktori user OS (`/Users/...`).
+5. Di dalam Grup, Anda bisa memanggil perintah dengan berbagai cara:
+   - `/status` atau `/status@NamaBotAnda`
+   - `/query kenapa siklus terakhir hold?` atau `/query@NamaBotAnda analisa posisi sekarang`
+   - `@NamaBotAnda /status` atau `@NamaBotAnda /query apa isi log terakhir?`
+   *(Catatan: Jika ingin memakai format `@NamaBotAnda /query ...`, pastikan Group Privacy bot di `@BotFather` -> `/setprivacy` diset ke `Disable`, atau cukup gunakan `/status` / `/query` dengan `/` di awal yang selalu diterima oleh Telegram).*
 
 ---
 
@@ -296,6 +319,9 @@ RUST_LOG=info
 
 # 6. Menjalankan Desktop App GUI Visual (atau cukup Double-Click trade-bot.exe tanpa argumen)
 ./target/release/trade-bot gui --port 8787
+
+# 6b. Membungkus Aplikasi Klik-Ganda macOS (dist/TradeBot.app) & Paket Portable Windows (dist/windows-portable/)
+./target/release/trade-bot package-app
 
 # 7. Tanya langsung ke AI seputar data trading bot, log, & skills (/query)
 ./target/release/trade-bot query "kenapa siklus terakhir belum beli?"

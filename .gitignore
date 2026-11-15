@@ -4,3 +4,4 @@
 *.profdata
 config.local.toml
 .env
+dist/

@@ -26,23 +26,54 @@ Aplikasi ini menggunakan `rustls` (murni Rust tanpa ketergantungan OpenSSL ekste
 
 ---
 
-### Opsi B — Cross-Compile `trade-bot.exe` dari macOS atau Linux
+### Opsi B — Cross-Compile `trade-bot.exe` Langsung dari macOS (Tanpa PC Windows)
 
-Jika Anda ingin meng-export file `.exe` Windows langsung dari laptop macOS/Linux:
+Jika Anda menggunakan Mac dan ingin menghasilkan file **`trade-bot.exe`** untuk Windows:
 
-1. **Tambahkan target Windows MSVC & `cargo-xwin`:**
+#### Cara 1: Menggunakan MinGW-w64 (`x86_64-pc-windows-gnu` — Paling Ringan di Mac)
+1. **Install compiler MinGW-w64 melalui Homebrew:**
    ```bash
-   rustup target add x86_64-pc-windows-msvc
-   cargo install cargo-xwin
+   brew install mingw-w64
    ```
-2. **Build binary release untuk Windows:**
+2. **Tambahkan target Windows GNU ke Rust:**
    ```bash
-   cargo xwin build --release --target x86_64-pc-windows-msvc
+   rustup target add x86_64-pc-windows-gnu
    ```
-3. **File hasil export berada di:**
+3. **Pastikan `rusqlite` menggunakan fitur `bundled` di `Cargo.toml`** (agar SQLite C dikompilasi langsung ke dalam `.exe` tanpa perlu install SQLite di Windows):
+   ```toml
+   rusqlite = { version = "0.31.0", features = ["bundled"] }
+   ```
+4. **Build file `.exe` dari Terminal Mac:**
+   ```bash
+   cargo build --release --target x86_64-pc-windows-gnu
+   ```
+5. **Hasil file `.exe` siap pakai berada di:**
    ```text
-   target/x86_64-pc-windows-msvc/release/trade-bot.exe
+   target/x86_64-pc-windows-gnu/release/trade-bot.exe
    ```
+
+#### Cara 2: Menggunakan `cargo-xwin` (`x86_64-pc-windows-msvc`)
+```bash
+rustup target add x86_64-pc-windows-msvc
+cargo install cargo-xwin
+cargo xwin build --release --target x86_64-pc-windows-msvc
+# Output: target/x86_64-pc-windows-msvc/release/trade-bot.exe
+```
+
+---
+
+### Opsi C — Otomatis Bungkus Aplikasi Klik-Ganda macOS (`TradeBot.app`) & Paket Windows (`package-app`)
+
+Jika Anda ingin membuat **aplikasi klik-ganda untuk macOS sendiri (`TradeBot.app` — setara `.exe` di Mac)** sekaligus menyiapkan folder **`dist/windows-portable/`** yang sudah berisi script klik-ganda `.bat`, jalankan:
+
+```bash
+./target/release/trade-bot package-app
+```
+
+Perintah tersebut otomatis menghasilkan:
+- **`dist/TradeBot.app`**: Aplikasi Desktop macOS yang bisa langsung di-**double-click di Finder** atau ditarik ke folder **Applications / Dock** di Mac.
+- **`dist/Start-TradeBot-Mac.command`**: Script klik-ganda alternatif untuk macOS.
+- **`dist/windows-portable/`**: Folder siap kirim ke PC Windows berisi `Start-TradeBot-GUI.bat`, `Start-Daemon.bat`, `Run-Wizard.bat`, `Check-Config.bat`, `config.json`, `.env.example`, dan `trade-bot.exe` (jika sudah di-cross-compile).
 
 ---
 

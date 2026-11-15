@@ -6,20 +6,16 @@
   "poll_interval_secs": 15,
   "data_dir": ".trade-bot",
   "strategy": {
-    "decision_policy": "auto",
     "fast_ema_period": 9,
     "slow_ema_period": 21,
     "rsi_period": 14,
     "rsi_overbought": 70.0,
     "rsi_oversold": 30.0,
     "atr_period": 14,
-    "min_confidence": 0.6
+    "min_confidence": 0.55,
+    "decision_policy": "auto"
   },
   "risk": {
-    "sizing_mode": "probability_ev",
-    "min_order_usdt": 15.0,
-    "max_order_usdt": 0.0,
-    "require_positive_ev": true,
     "leverage": 3,
     "max_leverage": 10,
     "risk_per_trade_pct": 0.01,
@@ -27,7 +23,11 @@
     "atr_tp_multiplier": 3.0,
     "max_daily_drawdown_pct": 0.05,
     "max_open_positions": 1,
-    "initial_paper_balance_usdt": 1000.0
+    "initial_paper_balance_usdt": 1000.0,
+    "sizing_mode": "probability_ev",
+    "min_order_usdt": 10.0,
+    "max_order_usdt": 0.0,
+    "require_positive_ev": true
   },
   "ai": {
     "enabled": false,

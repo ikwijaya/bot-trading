@@ -14,8 +14,9 @@ use crate::adapters::state_store::{
     load_config_file, load_dotenv_file, save_config_file, JsonStateStore, SystemClock,
 };
 use crate::adapters::telegram::{
-    format_telegram_cycle_notification, format_telegram_help, is_authorized_chat,
-    parse_telegram_command, TelegramBotAdapter, TelegramCommand,
+    evaluate_telegram_access, format_telegram_cycle_notification, format_telegram_help,
+    format_telegram_whoami_report, parse_telegram_command, sanitize_group_non_pii,
+    TelegramAccessDecision, TelegramBotAdapter, TelegramCommand,
 };
 use crate::core::agent::{format_skills_markdown, AgentEngine};
 use crate::core::domain::{
@@ -144,8 +145,18 @@ pub enum Commands {
         no_open: bool,
     },
 
+    /// Package clickable macOS Desktop App (`TradeBot.app`) and Windows `.exe` portable bundle (`dist/`).
+    PackageApp {
+        /// Output directory for packaged bundles (`TradeBot.app` and `windows-portable/`).
+        #[arg(short, long, default_value = "dist")]
+        output_dir: PathBuf,
+    },
+
     /// Send a test message to the configured Telegram Bot to verify connectivity.
     TelegramTest,
+
+    /// Automatically discover and display your personal Owner ID and Group IDs from recent Telegram messages.
+    TelegramWhoami,
 
     /// Internal worker loop invoked by the background daemon spawner.
     #[command(hide = true)]
@@ -1265,6 +1276,208 @@ async fn run_desktop_gui_server(
     Ok("Desktop App GUI closed.".to_string())
 }
 
+/// Builds a standard macOS `Info.plist` XML manifest for a clickable `.app` bundle.
+pub fn build_macos_info_plist(app_name: &str, bundle_id: &str, version: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{app_name}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{bundle_id}</string>
+    <key>CFBundleName</key>
+    <string>{app_name}</string>
+    <key>CFBundleDisplayName</key>
+    <string>{app_name}</string>
+    <key>CFBundleVersion</key>
+    <string>{version}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+"#
+    )
+}
+
+/// Builds an executable macOS shell script that launches the Desktop App GUI from the project directory.
+pub fn build_macos_launcher_script(work_dir: &std::path::Path, bin_path: &std::path::Path) -> String {
+    format!(
+        "#!/bin/bash\n\
+         cd \"{}\" || exit 1\n\
+         if lsof -i :8787 >/dev/null 2>&1; then\n\
+             open \"http://127.0.0.1:8787\"\n\
+         else\n\
+             \"{}\" gui --port 8787\n\
+         fi\n",
+        work_dir.display(),
+        bin_path.display()
+    )
+}
+
+/// Returns the portable Windows `.bat` launcher scripts for `windows-portable/`.
+pub fn build_windows_launcher_scripts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "Start-TradeBot-GUI.bat",
+            "@echo off\r\ncd /d \"%~dp0\"\r\nstart \"\" \"trade-bot.exe\" gui --port 8787\r\n",
+        ),
+        (
+            "Start-Daemon.bat",
+            "@echo off\r\ncd /d \"%~dp0\"\r\ntrade-bot.exe --config config.json --worker-id main start\r\npause\r\n",
+        ),
+        (
+            "Run-Wizard.bat",
+            "@echo off\r\ncd /d \"%~dp0\"\r\ntrade-bot.exe wizard\r\npause\r\n",
+        ),
+        (
+            "Check-Config.bat",
+            "@echo off\r\ncd /d \"%~dp0\"\r\ntrade-bot.exe --config config.json check-config\r\npause\r\n",
+        ),
+    ]
+}
+
+/// Formats the packaging report and cross-compilation instructions for macOS -> Windows `.exe`.
+pub fn format_cross_compile_instructions(
+    windows_exe_copied: bool,
+    windows_exe_source: &std::path::Path,
+    output_dir: &std::path::Path,
+) -> String {
+    let win_status = if windows_exe_copied {
+        format!(
+            "✅ File Windows `trade-bot.exe` ditemukan di `{}` dan berhasil disalin ke `{}/windows-portable/trade-bot.exe`!",
+            windows_exe_source.display(),
+            output_dir.display()
+        )
+    } else {
+        format!(
+            "ℹ️ File `trade-bot.exe` belum di-cross-compile (belum ada di `{}`).\n   \
+             Untuk menghasilkan `trade-bot.exe` Windows langsung dari macOS, jalankan 3 langkah ini:\n   \
+             1. brew install mingw-w64\n   \
+             2. rustup target add x86_64-pc-windows-gnu\n   \
+             3. cargo build --release --target x86_64-pc-windows-gnu\n   \
+             Lalu jalankan ulang `./target/release/trade-bot package-app` agar `trade-bot.exe` otomatis masuk ke `{}/windows-portable/`.",
+            windows_exe_source.display(),
+            output_dir.display()
+        )
+    };
+
+    format!(
+        "========================================================================\n\
+         📦  PAKET APLIKASI DESKTOP BERHASIL DIBUAT DI: {out}\n\
+         ========================================================================\n\
+         🍎 [1] Aplikasi Klik-Ganda macOS (Setara .exe untuk Mac):\n\
+            - {out}/TradeBot.app              (Double-click di Finder atau geser ke Applications/Dock)\n\
+            - {out}/Start-TradeBot-Mac.command (Double-click untuk membuka Desktop App GUI di Mac)\n\n\
+         🪟 [2] Paket Portable Windows ({out}/windows-portable/):\n\
+            - Start-TradeBot-GUI.bat          (Double-click di Windows untuk membuka Desktop GUI)\n\
+            - Start-Daemon.bat                (Menjalankan background daemon di Windows)\n\
+            - Run-Wizard.bat                  (Setup Wizard interaktif di Windows)\n\
+            - Check-Config.bat                (Validasi config & .env di Windows)\n\
+            - config.json & .env.example\n\n\
+         🔧 [3] Status Binary Windows (.exe) dari macOS:\n\
+         {win_status}\n\
+         ========================================================================",
+        out = output_dir.display(),
+        win_status = win_status
+    )
+}
+
+/// Generates clickable macOS `.app` bundle (`TradeBot.app`), `.command` script, and `windows-portable/` directory.
+pub fn package_desktop_app_bundles(
+    output_dir: &std::path::Path,
+    config_path: &std::path::Path,
+) -> Result<String, DomainError> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let release_bin = cwd.join("target/release/trade-bot");
+    let active_bin = if release_bin.exists() {
+        release_bin
+    } else {
+        std::env::current_exe().unwrap_or_else(|_| cwd.join("target/debug/trade-bot"))
+    };
+
+    // 1. Create macOS TradeBot.app bundle
+    let macos_contents = output_dir.join("TradeBot.app").join("Contents");
+    let macos_bin_dir = macos_contents.join("MacOS");
+    std::fs::create_dir_all(&macos_bin_dir).map_err(|e| DomainError::StateError {
+        message: format!("Failed to create {}: {}", macos_bin_dir.display(), e),
+    })?;
+
+    let plist_xml = build_macos_info_plist("TradeBot", "local.tradebot.desktop", "0.1.0");
+    std::fs::write(macos_contents.join("Info.plist"), plist_xml).map_err(|e| {
+        DomainError::StateError {
+            message: format!("Failed to write Info.plist: {}", e),
+        }
+    })?;
+
+    let launcher_sh = build_macos_launcher_script(&cwd, &active_bin);
+    let app_exec_path = macos_bin_dir.join("TradeBot");
+    std::fs::write(&app_exec_path, &launcher_sh).map_err(|e| DomainError::StateError {
+        message: format!("Failed to write {}: {}", app_exec_path.display(), e),
+    })?;
+
+    let command_script_path = output_dir.join("Start-TradeBot-Mac.command");
+    std::fs::write(&command_script_path, &launcher_sh).map_err(|e| DomainError::StateError {
+        message: format!("Failed to write {}: {}", command_script_path.display(), e),
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&app_exec_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(&app_exec_path, perms);
+        }
+        if let Ok(meta) = std::fs::metadata(&command_script_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(&command_script_path, perms);
+        }
+    }
+
+    // 2. Create Windows portable bundle directory
+    let win_dir = output_dir.join("windows-portable");
+    std::fs::create_dir_all(&win_dir).map_err(|e| DomainError::StateError {
+        message: format!("Failed to create {}: {}", win_dir.display(), e),
+    })?;
+
+    for (filename, content) in build_windows_launcher_scripts() {
+        let script_path = win_dir.join(filename);
+        std::fs::write(&script_path, content).map_err(|e| DomainError::StateError {
+            message: format!("Failed to write {}: {}", script_path.display(), e),
+        })?;
+    }
+
+    // Copy config.json (or generate default) and .env.example into windows-portable/
+    let cfg = load_config_file(config_path).unwrap_or_default();
+    let _ = save_config_file(&win_dir.join("config.json"), &cfg);
+    if std::path::Path::new(".env.example").exists() {
+        let _ = std::fs::copy(".env.example", win_dir.join(".env.example"));
+    }
+
+    // Check if cross-compiled Windows trade-bot.exe exists
+    let cross_exe = cwd.join("target/x86_64-pc-windows-gnu/release/trade-bot.exe");
+    let windows_exe_copied = if cross_exe.exists() {
+        std::fs::copy(&cross_exe, win_dir.join("trade-bot.exe")).is_ok()
+    } else {
+        false
+    };
+
+    Ok(format_cross_compile_instructions(
+        windows_exe_copied,
+        &cross_exe,
+        output_dir,
+    ))
+}
+
 /// Dispatches CLI commands and returns user-facing output text.
 pub async fn execute_cli(cli: Cli) -> Result<String, DomainError> {
     let _ = load_dotenv_file(std::path::Path::new(".env"));
@@ -1529,6 +1742,10 @@ pub async fn execute_cli(cli: Cli) -> Result<String, DomainError> {
             run_desktop_gui_server(&cli.config, &cli.worker_id, port, no_open).await
         }
 
+        Commands::PackageApp { output_dir } => {
+            package_desktop_app_bundles(&output_dir, &cli.config)
+        }
+
         Commands::TelegramTest => {
             let mut cfg = load_config_file(&cli.config)?;
             cfg.telegram.enabled = true;
@@ -1539,6 +1756,14 @@ pub async fn execute_cli(cli: Cli) -> Result<String, DomainError> {
             ))
             .await?;
             Ok("Telegram test message sent successfully.".to_string())
+        }
+
+        Commands::TelegramWhoami => {
+            let mut cfg = load_config_file(&cli.config)?;
+            cfg.telegram.enabled = true;
+            let tg = TelegramBotAdapter::from_env(&cfg.telegram);
+            let chats = tg.discover_chats().await?;
+            Ok(format_telegram_whoami_report(&chats))
         }
 
         Commands::RunWorker => {
@@ -1729,12 +1954,41 @@ async fn run_worker_loop(
             if let Ok(updates) = tg.fetch_updates(tg_offset).await {
                 for upd in updates {
                     tg_offset = upd.update_id + 1;
-                    if !is_authorized_chat(&upd.chat_id, tg.authorized_chat_id()) {
+                    let access = evaluate_telegram_access(
+                        &upd,
+                        tg.owner_id(),
+                        tg.authorized_chat_id(),
+                    );
+                    if access == TelegramAccessDecision::DenySilent {
+                        if !upd.is_group {
+                            let _ = append_log_line(
+                                &store.log_file_path(),
+                                &format!(
+                                    "Telegram private message silently ignored from non-owner sender_id={} chat_id={}",
+                                    upd.sender_id, upd.chat_id
+                                ),
+                            );
+                        } else {
+                            let _ = append_log_line(
+                                &store.log_file_path(),
+                                &format!(
+                                    "Telegram command ignored from unauthorized group chat_id={} (add '{}' to TELEGRAM_CHAT_ID in .env to authorize this Group)",
+                                    upd.chat_id, upd.chat_id
+                                ),
+                            );
+                        }
                         continue;
                     }
                     if let Some(cmd) = parse_telegram_command(&upd.text) {
-                        let should_exit =
-                            handle_telegram_command(cmd, cfg, Arc::clone(&store), &tg).await;
+                        let should_exit = handle_telegram_command(
+                            cmd,
+                            &upd.chat_id,
+                            access,
+                            cfg,
+                            Arc::clone(&store),
+                            &tg,
+                        )
+                        .await;
                         if should_exit {
                             return Ok(());
                         }
@@ -1755,12 +2009,81 @@ async fn run_worker_loop(
     Ok(())
 }
 
+/// Applies a single configuration key-value mutation requested via `/set-config <key> <value>` (Owner Private Chat only).
+pub fn apply_telegram_config_mutation(
+    cfg: &mut BotConfig,
+    key: &str,
+    value: &str,
+) -> Result<String, String> {
+    let k = key.trim().to_lowercase();
+    let v = value.trim();
+    if k.is_empty() || v.is_empty() {
+        return Err(
+            "Format: /set-config <key> <value> (contoh: /set-config symbol ETHUSDT)".to_string(),
+        );
+    }
+    match k.as_str() {
+        "symbol" => {
+            cfg.symbol = v.to_uppercase();
+            Ok(format!("✅ Config `symbol` berhasil diubah menjadi `{}`.", cfg.symbol))
+        }
+        "interval" => {
+            cfg.interval = v.to_string();
+            Ok(format!("✅ Config `interval` berhasil diubah menjadi `{}`.", cfg.interval))
+        }
+        "decision_policy" => {
+            cfg.strategy.decision_policy = match v.to_lowercase().as_str() {
+                "auto" => DecisionPolicy::Auto,
+                "confirm_by_chat" => DecisionPolicy::ConfirmByChat,
+                "skip" => DecisionPolicy::Skip,
+                _ => return Err("Nilai `decision_policy` harus: auto | confirm_by_chat | skip".to_string()),
+            };
+            Ok(format!(
+                "✅ Config `decision_policy` berhasil diubah menjadi `{}`.",
+                cfg.strategy.decision_policy
+            ))
+        }
+        "min_order_usdt" => {
+            let num: f64 = v
+                .parse()
+                .map_err(|_| "Nilai `min_order_usdt` harus berupa angka.".to_string())?;
+            cfg.risk.min_order_usdt = num;
+            Ok(format!("✅ Config `min_order_usdt` berhasil diubah menjadi `${:.2}`.", num))
+        }
+        "max_order_usdt" => {
+            let num: f64 = v
+                .parse()
+                .map_err(|_| "Nilai `max_order_usdt` harus berupa angka.".to_string())?;
+            cfg.risk.max_order_usdt = num;
+            Ok(format!("✅ Config `max_order_usdt` berhasil diubah menjadi `${:.2}`.", num))
+        }
+        "leverage" => {
+            let lev: u32 = v
+                .parse()
+                .map_err(|_| "Nilai `leverage` harus berupa bilangan bulat positif.".to_string())?;
+            cfg.risk.leverage = lev;
+            Ok(format!("✅ Config `leverage` berhasil diubah menjadi `{}x`.", lev))
+        }
+        _ => Err(format!(
+            "Key `{}` tidak didukung via chat. Gunakan: symbol, interval, decision_policy, min_order_usdt, max_order_usdt, leverage.",
+            k
+        )),
+    }
+}
+
 async fn handle_telegram_command(
     cmd: TelegramCommand,
+    reply_chat_id: &str,
+    access: TelegramAccessDecision,
     cfg: &BotConfig,
     store: Arc<JsonStateStore>,
     tg: &TelegramBotAdapter,
 ) -> bool {
+    if access == TelegramAccessDecision::DenySilent {
+        return false;
+    }
+    let is_group = access == TelegramAccessDecision::AuthorizedGroup;
+
     match cmd {
         TelegramCommand::Status => {
             let state = store
@@ -1772,9 +2095,13 @@ async fn handle_telegram_command(
                 .ok()
                 .flatten()
                 .filter(|&pid| is_pid_alive(pid));
-            let _ = tg
-                .send_notification(&format_status_report(cfg, &state, live_pid))
-                .await;
+            let raw = format_status_report(cfg, &state, live_pid);
+            let out = if is_group {
+                sanitize_group_non_pii(&raw)
+            } else {
+                raw
+            };
+            let _ = tg.send_message_to_chat(reply_chat_id, &out).await;
             false
         }
         TelegramCommand::Positions => {
@@ -1783,44 +2110,85 @@ async fn handle_telegram_command(
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| BotState::new(cfg));
-            let _ = tg.send_notification(&format_positions_report(&state)).await;
+            let raw = format_positions_report(&state);
+            let out = if is_group {
+                sanitize_group_non_pii(&raw)
+            } else {
+                raw
+            };
+            let _ = tg.send_message_to_chat(reply_chat_id, &out).await;
             false
         }
         TelegramCommand::Logs => {
             let lines = read_recent_logs(&store.log_file_path(), 10).unwrap_or_default();
-            let text = if lines.is_empty() {
+            let raw = if lines.is_empty() {
                 "No logs yet.".to_string()
             } else {
                 lines.join("\n")
             };
-            let _ = tg.send_notification(&text).await;
+            let out = if is_group {
+                sanitize_group_non_pii(&raw)
+            } else {
+                raw
+            };
+            let _ = tg.send_message_to_chat(reply_chat_id, &out).await;
             false
         }
         TelegramCommand::Config => {
-            let _ = tg
-                .send_notification(&format!(
-                    "=== Active Config ===\nExchange: {}\nMode: {}\nSymbol: {} ({})\nDecision Policy: {}\nSizing Mode: {} (Min: ${:.2}, Max: ${:.2}, +EV: {})\nLeverage: {}x\nRisk/Trade: {:.2}%\nSL/TP ATR: {:.1}x / {:.1}x\nMax Daily Drawdown: {:.1}%\nAI Enabled: {}",
-                    cfg.exchange.provider,
-                    cfg.mode,
-                    cfg.symbol,
-                    cfg.interval,
-                    cfg.strategy.decision_policy,
-                    cfg.risk.sizing_mode,
-                    cfg.risk.min_order_usdt,
-                    cfg.risk.max_order_usdt,
-                    cfg.risk.require_positive_ev,
-                    cfg.risk.leverage,
-                    cfg.risk.risk_per_trade_pct * 100.0,
-                    cfg.risk.atr_sl_multiplier,
-                    cfg.risk.atr_tp_multiplier,
-                    cfg.risk.max_daily_drawdown_pct * 100.0,
-                    cfg.ai.enabled
-                ))
-                .await;
+            let raw = format!(
+                "=== Active Config ===\nExchange: {}\nMode: {}\nSymbol: {} ({})\nDecision Policy: {}\nSizing Mode: {} (Min: ${:.2}, Max: ${:.2}, +EV: {})\nLeverage: {}x\nRisk/Trade: {:.2}%\nSL/TP ATR: {:.1}x / {:.1}x\nMax Daily Drawdown: {:.1}%\nAI Enabled: {}",
+                cfg.exchange.provider,
+                cfg.mode,
+                cfg.symbol,
+                cfg.interval,
+                cfg.strategy.decision_policy,
+                cfg.risk.sizing_mode,
+                cfg.risk.min_order_usdt,
+                cfg.risk.max_order_usdt,
+                cfg.risk.require_positive_ev,
+                cfg.risk.leverage,
+                cfg.risk.risk_per_trade_pct * 100.0,
+                cfg.risk.atr_sl_multiplier,
+                cfg.risk.atr_tp_multiplier,
+                cfg.risk.max_daily_drawdown_pct * 100.0,
+                cfg.ai.enabled
+            );
+            let out = if is_group {
+                sanitize_group_non_pii(&raw)
+            } else {
+                raw
+            };
+            let _ = tg.send_message_to_chat(reply_chat_id, &out).await;
+            false
+        }
+        TelegramCommand::SetConfig { key, value } => {
+            if is_group {
+                let _ = tg
+                    .send_message_to_chat(
+                        reply_chat_id,
+                        "🔒 Perubahan konfigurasi (/set-config) DILARANG di dalam Grup Telegram. Hanya Owner yang dapat mengubah konfigurasi melalui Private Chat (DM).",
+                    )
+                    .await;
+                return false;
+            }
+            let mut updated_cfg = cfg.clone();
+            match apply_telegram_config_mutation(&mut updated_cfg, &key, &value) {
+                Ok(msg) => {
+                    let override_path =
+                        std::path::Path::new(&cfg.data_dir).join("config_override.json");
+                    let _ = save_config_file(&override_path, &updated_cfg);
+                    let _ = tg.send_message_to_chat(reply_chat_id, &msg).await;
+                }
+                Err(err) => {
+                    let _ = tg
+                        .send_message_to_chat(reply_chat_id, &format!("⚠️ {}", err))
+                        .await;
+                }
+            }
             false
         }
         TelegramCommand::ActualSkill => {
-            let md = store.load_skills_markdown().unwrap_or_else(|_| {
+            let raw = store.load_skills_markdown().unwrap_or_else(|_| {
                 let state = store
                     .load_state()
                     .ok()
@@ -1828,12 +2196,37 @@ async fn handle_telegram_command(
                     .unwrap_or_else(|| BotState::new(cfg));
                 format_skills_markdown(&cfg.symbol, &state.skill_knowledge, &state)
             });
-            let _ = tg.send_notification(&md).await;
+            let out = if is_group {
+                sanitize_group_non_pii(&raw)
+            } else {
+                raw
+            };
+            let _ = tg.send_message_to_chat(reply_chat_id, &out).await;
             false
         }
         TelegramCommand::Query(question) => {
-            let reply = answer_ai_query(&question, cfg, &store).await;
-            let _ = tg.send_notification(&reply).await;
+            let q_lower = question.to_lowercase();
+            if is_group
+                && (q_lower.contains("ubah config")
+                    || q_lower.contains("ganti config")
+                    || q_lower.contains("set-config")
+                    || q_lower.contains("set config"))
+            {
+                let _ = tg
+                    .send_message_to_chat(
+                        reply_chat_id,
+                        "🔒 Perubahan konfigurasi dilarang di dalam Grup Telegram. Silakan tanyakan informasi pasar/sinyal non-PII atau hubungi Owner via Private Chat.",
+                    )
+                    .await;
+                return false;
+            }
+            let raw_reply = answer_ai_query(&question, cfg, &store).await;
+            let out = if is_group {
+                sanitize_group_non_pii(&raw_reply)
+            } else {
+                raw_reply
+            };
+            let _ = tg.send_message_to_chat(reply_chat_id, &out).await;
             false
         }
         TelegramCommand::Approve => {
@@ -1850,11 +2243,14 @@ async fn handle_telegram_command(
                         fill.take_profit
                     );
                     let _ = append_log_line(&store.log_file_path(), &msg);
-                    let _ = tg.send_notification(&msg).await;
+                    let _ = tg.send_message_to_chat(reply_chat_id, &msg).await;
                 }
                 Err(err) => {
                     let _ = tg
-                        .send_notification(&format!("⚠️ Gagal eksekusi /approve: {}", err))
+                        .send_message_to_chat(
+                            reply_chat_id,
+                            &format!("⚠️ Gagal eksekusi /approve: {}", err),
+                        )
                         .await;
                 }
             }
@@ -1868,7 +2264,7 @@ async fn handle_telegram_command(
                 "ℹ️ Tidak ada proposal order yang tertahan saat ini."
             };
             let _ = append_log_line(&store.log_file_path(), msg);
-            let _ = tg.send_notification(msg).await;
+            let _ = tg.send_message_to_chat(reply_chat_id, msg).await;
             false
         }
         TelegramCommand::Panic => {
@@ -1877,15 +2273,20 @@ async fn handle_telegram_command(
                 .unwrap_or(0);
             let _ = stop_background_daemon(&store);
             let _ = tg
-                .send_notification(&format!(
-                    "[PANIC CLOSE] Daemon dihentikan & {} posisi terbuka telah ditutup.",
-                    closed
-                ))
+                .send_message_to_chat(
+                    reply_chat_id,
+                    &format!(
+                        "[PANIC CLOSE] Daemon dihentikan & {} posisi terbuka telah ditutup.",
+                        closed
+                    ),
+                )
                 .await;
             true
         }
         TelegramCommand::Help => {
-            let _ = tg.send_notification(&format_telegram_help()).await;
+            let _ = tg
+                .send_message_to_chat(reply_chat_id, &format_telegram_help())
+                .await;
             false
         }
     }
@@ -2196,20 +2597,63 @@ mod tests {
             handle_gui_http_request("GET", "/unknown", "", &cfg_path, "default").await;
         assert_eq!(st_404, 404);
 
+        // 7c. PackageApp (macOS .app bundle + Windows portable directory)
+        let dist_dir = temp_dir.join("dist_test");
+        let out_pkg = execute_cli(Cli {
+            config: cfg_path.clone(),
+            worker_id: "default".to_string(),
+            command: Some(Commands::PackageApp {
+                output_dir: dist_dir.clone(),
+            }),
+        })
+        .await
+        .unwrap();
+        assert!(out_pkg.contains("PAKET APLIKASI DESKTOP BERHASIL DIBUAT"));
+        assert!(dist_dir.join("TradeBot.app/Contents/Info.plist").exists());
+        assert!(dist_dir.join("TradeBot.app/Contents/MacOS/TradeBot").exists());
+        assert!(dist_dir.join("Start-TradeBot-Mac.command").exists());
+        assert!(dist_dir.join("windows-portable/Start-TradeBot-GUI.bat").exists());
+        assert!(dist_dir.join("windows-portable/config.json").exists());
+
+        let copied_msg = format_cross_compile_instructions(
+            true,
+            std::path::Path::new("target/x86_64-pc-windows-gnu/release/trade-bot.exe"),
+            &dist_dir,
+        );
+        assert!(copied_msg.contains("berhasil disalin"));
+
         // 8. Telegram command handlers (with disabled Telegram adapter so no network call is made)
         let store = Arc::new(JsonStateStore::new(&cfg.data_dir));
         let tg = TelegramBotAdapter::new(cfg.telegram.clone(), "".to_string(), "".to_string());
-        assert!(!handle_telegram_command(TelegramCommand::Status, &cfg, Arc::clone(&store), &tg).await);
-        assert!(!handle_telegram_command(TelegramCommand::Positions, &cfg, Arc::clone(&store), &tg).await);
-        assert!(!handle_telegram_command(TelegramCommand::Logs, &cfg, Arc::clone(&store), &tg).await);
-        assert!(!handle_telegram_command(TelegramCommand::Config, &cfg, Arc::clone(&store), &tg).await);
-        assert!(!handle_telegram_command(TelegramCommand::ActualSkill, &cfg, Arc::clone(&store), &tg).await);
-        assert!(!handle_telegram_command(TelegramCommand::Query("".to_string()), &cfg, Arc::clone(&store), &tg).await);
-        assert!(!handle_telegram_command(TelegramCommand::Query("apa kabar bot?".to_string()), &cfg, Arc::clone(&store), &tg).await);
-        assert!(!handle_telegram_command(TelegramCommand::Approve, &cfg, Arc::clone(&store), &tg).await);
-        assert!(!handle_telegram_command(TelegramCommand::Reject, &cfg, Arc::clone(&store), &tg).await);
-        assert!(!handle_telegram_command(TelegramCommand::Help, &cfg, Arc::clone(&store), &tg).await);
-        assert!(handle_telegram_command(TelegramCommand::Panic, &cfg, Arc::clone(&store), &tg).await);
+        let group_chat_id = "-100987654321";
+        let group_access = TelegramAccessDecision::AuthorizedGroup;
+        let owner_access = TelegramAccessDecision::OwnerPrivate;
+
+        assert!(!handle_telegram_command(TelegramCommand::Status, group_chat_id, group_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::Positions, group_chat_id, group_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::Logs, group_chat_id, group_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::Config, group_chat_id, group_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::SetConfig { key: "symbol".to_string(), value: "ETHUSDT".to_string() }, group_chat_id, group_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::SetConfig { key: "symbol".to_string(), value: "ETHUSDT".to_string() }, "123456789", owner_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::ActualSkill, group_chat_id, group_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::Query("".to_string()), group_chat_id, group_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::Query("ubah config ke ethusdt".to_string()), group_chat_id, group_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::Query("apa kabar bot?".to_string()), group_chat_id, group_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::Approve, group_chat_id, owner_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::Reject, group_chat_id, owner_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::Help, group_chat_id, group_access, &cfg, Arc::clone(&store), &tg).await);
+        assert!(!handle_telegram_command(TelegramCommand::Status, "999999", TelegramAccessDecision::DenySilent, &cfg, Arc::clone(&store), &tg).await);
+        assert!(handle_telegram_command(TelegramCommand::Panic, group_chat_id, owner_access, &cfg, Arc::clone(&store), &tg).await);
+
+        let mut test_cfg = BotConfig::default();
+        assert!(apply_telegram_config_mutation(&mut test_cfg, "symbol", "solusdt").is_ok());
+        assert_eq!(test_cfg.symbol, "SOLUSDT");
+        assert!(apply_telegram_config_mutation(&mut test_cfg, "interval", "15m").is_ok());
+        assert!(apply_telegram_config_mutation(&mut test_cfg, "decision_policy", "confirm_by_chat").is_ok());
+        assert!(apply_telegram_config_mutation(&mut test_cfg, "min_order_usdt", "25").is_ok());
+        assert!(apply_telegram_config_mutation(&mut test_cfg, "max_order_usdt", "500").is_ok());
+        assert!(apply_telegram_config_mutation(&mut test_cfg, "leverage", "5").is_ok());
+        assert!(apply_telegram_config_mutation(&mut test_cfg, "unknown_key", "1").is_err());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
