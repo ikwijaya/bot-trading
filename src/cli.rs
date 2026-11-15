@@ -134,8 +134,12 @@ pub enum Commands {
         prompt: Vec<String>,
     },
 
-    /// Launch the built-in Desktop App GUI dashboard (auto-launched when double-clicking `trade-bot.exe`).
+    /// Launch the built-in Desktop & Mobile Web App GUI dashboard (auto-launched when double-clicking `trade-bot.exe`).
     Gui {
+        /// Bind host address (`0.0.0.0` allows iPhone/Android on the same Wi-Fi to connect; `127.0.0.1` for local only).
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+
         /// Local port for the Desktop App GUI server.
         #[arg(short, long, default_value_t = 8787)]
         port: u16,
@@ -145,9 +149,9 @@ pub enum Commands {
         no_open: bool,
     },
 
-    /// Package clickable macOS Desktop App (`TradeBot.app`) and Windows `.exe` portable bundle (`dist/`).
+    /// Package clickable macOS Desktop App (`TradeBot.app`), Windows `.exe` (`windows-portable/`), and Android Termux (`android-termux/`).
     PackageApp {
-        /// Output directory for packaged bundles (`TradeBot.app` and `windows-portable/`).
+        /// Output directory for packaged bundles (`TradeBot.app`, `windows-portable/`, and `android-termux/`).
         #[arg(short, long, default_value = "dist")]
         output_dir: PathBuf,
     },
@@ -826,14 +830,20 @@ pub async fn answer_ai_query(question: &str, cfg: &BotConfig, store: &JsonStateS
     }
 }
 
-/// Renders the self-contained single-page Desktop App HTML/CSS/JS GUI dashboard.
+/// Renders the self-contained single-page Desktop & Mobile Web App HTML/CSS/JS GUI dashboard.
 pub fn build_desktop_dashboard_html() -> String {
-    r#"<!DOCTYPE html>
+    r##"<!DOCTYPE html>
 <html lang="id">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Trade-Bot Desktop App — Multi-Exchange Futures Hybrid Agent</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="TradeBot" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="theme-color" content="#0b1020" />
+<link rel="manifest" href="/manifest.json" />
+<title>Trade-Bot Desktop & Mobile App — Multi-Exchange Futures Hybrid Agent</title>
 <style>
   :root { --bg:#0b1020; --card:#131b33; --border:#253159; --text:#eef2ff; --muted:#94a3b8; --accent:#38bdf8; --green:#22c55e; --red:#ef4444; --amber:#f59e0b; }
   * { box-sizing:border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -978,11 +988,26 @@ refreshState();
 setInterval(refreshState, 2000);
 </script>
 </body>
-</html>"#.to_string()
+</html>"##.to_string()
 }
 
-/// Purely testable HTTP request router for the built-in Desktop App GUI (`GET /`, `GET /api/status`,
-/// `POST /api/action`, `POST /api/query`, `POST /api/config`).
+/// Builds the Web App Manifest (`manifest.json`) so iPhone (iOS Safari) and Android (Chrome)
+/// can install the dashboard to their Home Screen as a standalone full-screen mobile app.
+pub fn build_pwa_manifest_json() -> String {
+    serde_json::json!({
+        "name": "Trade-Bot Hybrid Futures Agent",
+        "short_name": "TradeBot",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0b1020",
+        "theme_color": "#0b1020",
+        "orientation": "portrait-primary"
+    })
+    .to_string()
+}
+
+/// Purely testable HTTP request router for the built-in Desktop App GUI (`GET /`, `GET /manifest.json`,
+/// `GET /api/status`, `POST /api/action`, `POST /api/query`, `POST /api/config`).
 pub async fn handle_gui_http_request(
     method: &str,
     path: &str,
@@ -992,6 +1017,11 @@ pub async fn handle_gui_http_request(
 ) -> (u16, &'static str, String) {
     match (method, path) {
         ("GET", "/") => (200, "text/html; charset=utf-8", build_desktop_dashboard_html()),
+        ("GET", "/manifest.json") => (
+            200,
+            "application/manifest+json; charset=utf-8",
+            build_pwa_manifest_json(),
+        ),
         ("GET", "/api/status") => {
             let cfg = load_config_file(config_path).unwrap_or_default();
             let store = JsonStateStore::with_worker(&cfg.data_dir, worker_id);
@@ -1217,24 +1247,32 @@ fn try_open_desktop_window(url: &str) {
 async fn run_desktop_gui_server(
     config_path: &std::path::Path,
     worker_id: &str,
+    host: &str,
     port: u16,
     no_open: bool,
 ) -> Result<String, DomainError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let addr = format!("127.0.0.1:{}", port);
+    let bind_host = if host.trim().is_empty() {
+        "0.0.0.0"
+    } else {
+        host.trim()
+    };
+    let addr = format!("{}:{}", bind_host, port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|e| DomainError::DaemonError {
             message: format!("Gagal membuka port Desktop GUI {}: {}", addr, e),
         })?;
-    let url = format!("http://{}", addr);
+    let local_url = format!("http://127.0.0.1:{}", port);
     println!("========================================================================");
-    println!("🖥️  TRADE-BOT DESKTOP APP GUI AKTIF DI: {}", url);
-    println!("   Config: {} | Worker: {}", config_path.display(), worker_id);
+    println!("🖥️  TRADE-BOT DESKTOP & MOBILE APP GUI AKTIF DI: {}", local_url);
+    println!("📱 iPhone (Safari) / Android (Chrome) di Wi-Fi yang sama: http://<IP-Perangkat-Ini>:{}", port);
+    println!("   (Di Safari iPhone: klik Share -> Add to Home Screen untuk dijadikan App iOS layar penuh)");
+    println!("   Config: {} | Worker: {} | Bind: {}", config_path.display(), worker_id, addr);
     println!("   Tekan Ctrl+C untuk menutup Desktop App GUI.");
     println!("========================================================================");
     if !no_open {
-        try_open_desktop_window(&url);
+        try_open_desktop_window(&local_url);
     }
 
     loop {
@@ -1344,7 +1382,125 @@ pub fn build_windows_launcher_scripts() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Formats the packaging report and cross-compilation instructions for macOS -> Windows `.exe`.
+/// Resolves the cross-compiled Windows `trade-bot.exe` path by checking `x86_64-pc-windows-msvc` (`cargo-xwin`),
+/// `x86_64-pc-windows-gnu` (`mingw-w64`), and `aarch64-pc-windows-msvc` targets in priority order.
+pub fn resolve_windows_cross_compiled_exe(
+    project_root: &std::path::Path,
+) -> (std::path::PathBuf, bool) {
+    let candidates = [
+        "target/x86_64-pc-windows-msvc/release/trade-bot.exe",
+        "target/x86_64-pc-windows-gnu/release/trade-bot.exe",
+        "target/aarch64-pc-windows-msvc/release/trade-bot.exe",
+    ];
+    for rel in candidates {
+        let p = project_root.join(rel);
+        if p.exists() {
+            return (p, true);
+        }
+    }
+    (
+        project_root.join("target/x86_64-pc-windows-msvc/release/trade-bot.exe"),
+        false,
+    )
+}
+
+/// Resolves the cross-compiled Android ARM64 `trade-bot` binary path if present.
+pub fn resolve_android_cross_compiled_bin(
+    project_root: &std::path::Path,
+) -> (std::path::PathBuf, bool) {
+    let candidates = [
+        "target/aarch64-linux-android/release/trade-bot",
+        "target/aarch64-unknown-linux-musl/release/trade-bot",
+    ];
+    for rel in candidates {
+        let p = project_root.join(rel);
+        if p.exists() {
+            return (p, true);
+        }
+    }
+    (
+        project_root.join("target/aarch64-linux-android/release/trade-bot"),
+        false,
+    )
+}
+
+/// Returns the portable Android (Termux) launcher & setup scripts for `android-termux/`.
+pub fn build_android_termux_scripts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "setup-termux.sh",
+            "#!/data/data/com.termux/files/usr/bin/bash\n\
+             set -e\n\
+             echo \"=== [Trade-Bot Android Termux Setup] ===\"\n\
+             pkg update -y && pkg upgrade -y\n\
+             pkg install -y rust clang make git pkg-config termux-api\n\
+             if [ -f \"Cargo.toml\" ]; then\n\
+               echo \"Mem-build binary trade-bot langsung di Termux Android...\"\n\
+               cargo build --release\n\
+               cp target/release/trade-bot ./trade-bot\n\
+             fi\n\
+             chmod +x ./trade-bot ./*.sh 2>/dev/null || true\n\
+             echo \"✅ Setup selesai! Jalankan ./start-daemon-android.sh untuk menyalakan bot 24 jam.\"\n",
+        ),
+        (
+            "start-daemon-android.sh",
+            "#!/data/data/com.termux/files/usr/bin/bash\n\
+             cd \"$(dirname \"$0\")\" || exit 1\n\
+             if command -v termux-wake-lock >/dev/null 2>&1; then\n\
+               termux-wake-lock\n\
+               echo \"🔒 Termux Wake-Lock aktif (CPU tetap jalan saat layar HP mati).\"\n\
+             fi\n\
+             BIN=\"./trade-bot\"\n\
+             if [ ! -x \"$BIN\" ] && [ -x \"./target/release/trade-bot\" ]; then\n\
+               BIN=\"./target/release/trade-bot\"\n\
+             fi\n\
+             \"$BIN\" --config config.json --worker-id main start --daemon\n",
+        ),
+        (
+            "start-gui-android.sh",
+            "#!/data/data/com.termux/files/usr/bin/bash\n\
+             cd \"$(dirname \"$0\")\" || exit 1\n\
+             if command -v termux-wake-lock >/dev/null 2>&1; then\n\
+               termux-wake-lock\n\
+             fi\n\
+             BIN=\"./trade-bot\"\n\
+             if [ ! -x \"$BIN\" ] && [ -x \"./target/release/trade-bot\" ]; then\n\
+               BIN=\"./target/release/trade-bot\"\n\
+             fi\n\
+             if command -v termux-open-url >/dev/null 2>&1; then\n\
+               (sleep 2 && termux-open-url \"http://127.0.0.1:8787\") &\n\
+             fi\n\
+             \"$BIN\" --config config.json gui --host 0.0.0.0 --port 8787 --no-open\n",
+        ),
+        (
+            "stop-daemon-android.sh",
+            "#!/data/data/com.termux/files/usr/bin/bash\n\
+             cd \"$(dirname \"$0\")\" || exit 1\n\
+             BIN=\"./trade-bot\"\n\
+             if [ ! -x \"$BIN\" ] && [ -x \"./target/release/trade-bot\" ]; then\n\
+               BIN=\"./target/release/trade-bot\"\n\
+             fi\n\
+             \"$BIN\" --config config.json --worker-id main stop\n\
+             if command -v termux-wake-unlock >/dev/null 2>&1; then\n\
+               termux-wake-unlock\n\
+               echo \"🔓 Termux Wake-Lock dilepas.\"\n\
+             fi\n",
+        ),
+        (
+            "README-ANDROID.md",
+            "# Panduan Singkat Trade-Bot di Android (Termux 24/7)\n\n\
+             Lihat panduan lengkap langkah-demi-langkah di file `ANDROID_GUIDE.md`.\n\n\
+             ## Langkah Cepat di Termux Android:\n\
+             1. Pastikan izin baterai aplikasi **Termux** disetel ke **Unrestricted / Jangan Optimalkan**.\n\
+             2. Jalankan `bash setup-termux.sh` (hanya perlu sekali saat pertama kali).\n\
+             3. Salin `.env.example` ke `.env` dan isi API Key serta `TELEGRAM_BOT_TOKEN`.\n\
+             4. Jalankan `./start-daemon-android.sh` untuk menyalakan worker 24 jam dengan `termux-wake-lock`.\n\
+             5. Jalankan `./start-gui-android.sh` untuk membuka Dashboard Web App di Chrome Android (`http://127.0.0.1:8787`).\n",
+        ),
+    ]
+}
+
+/// Formats the packaging report and cross-compilation instructions for macOS, Windows `.exe`, Android Termux, and iPhone PWA.
 pub fn format_cross_compile_instructions(
     windows_exe_copied: bool,
     windows_exe_source: &std::path::Path,
@@ -1359,10 +1515,11 @@ pub fn format_cross_compile_instructions(
     } else {
         format!(
             "ℹ️ File `trade-bot.exe` belum di-cross-compile (belum ada di `{}`).\n   \
-             Untuk menghasilkan `trade-bot.exe` Windows langsung dari macOS, jalankan 3 langkah ini:\n   \
-             1. brew install mingw-w64\n   \
-             2. rustup target add x86_64-pc-windows-gnu\n   \
-             3. cargo build --release --target x86_64-pc-windows-gnu\n   \
+             Untuk menghasilkan `trade-bot.exe` Windows langsung dari macOS:\n   \
+             • Opsi A (cargo-xwin / MSVC):\n     \
+               cargo xwin build --release --target x86_64-pc-windows-msvc\n   \
+             • Opsi B (MinGW / GNU):\n     \
+               brew install mingw-w64 && rustup target add x86_64-pc-windows-gnu && cargo build --release --target x86_64-pc-windows-gnu\n   \
              Lalu jalankan ulang `./target/release/trade-bot package-app` agar `trade-bot.exe` otomatis masuk ke `{}/windows-portable/`.",
             windows_exe_source.display(),
             output_dir.display()
@@ -1371,7 +1528,7 @@ pub fn format_cross_compile_instructions(
 
     format!(
         "========================================================================\n\
-         📦  PAKET APLIKASI DESKTOP BERHASIL DIBUAT DI: {out}\n\
+         📦  PAKET APLIKASI DESKTOP & MOBILE BERHASIL DIBUAT DI: {out}\n\
          ========================================================================\n\
          🍎 [1] Aplikasi Klik-Ganda macOS (Setara .exe untuk Mac):\n\
             - {out}/TradeBot.app              (Double-click di Finder atau geser ke Applications/Dock)\n\
@@ -1382,7 +1539,15 @@ pub fn format_cross_compile_instructions(
             - Run-Wizard.bat                  (Setup Wizard interaktif di Windows)\n\
             - Check-Config.bat                (Validasi config & .env di Windows)\n\
             - config.json & .env.example\n\n\
-         🔧 [3] Status Binary Windows (.exe) dari macOS:\n\
+         🤖 [3] Paket Portable Android 24/7 ({out}/android-termux/ & ANDROID_GUIDE.md):\n\
+            - setup-termux.sh                 (Instalasi otomatis Rust/Clang & build di Termux Android)\n\
+            - start-daemon-android.sh         (Menyalakan daemon 24 jam + `termux-wake-lock`)\n\
+            - start-gui-android.sh            (Membuka GUI di Chrome Android `http://127.0.0.1:8787`)\n\
+            - stop-daemon-android.sh          (Menghentikan daemon & melepas wake-lock)\n\n\
+         📱 [4] Aplikasi iPhone (iOS Full-Screen Web App / PWA):\n\
+            - Buka `http://<IP-Mac-atau-PC-Anda>:8787` di Safari iPhone\n\
+            - Tap tombol Share -> Add to Home Screen (Tambahkan ke Layar Utama)\n\n\
+         🔧 [5] Status Binary Windows (.exe) dari macOS:\n\
          {win_status}\n\
          ========================================================================",
         out = output_dir.display(),
@@ -1390,7 +1555,7 @@ pub fn format_cross_compile_instructions(
     )
 }
 
-/// Generates clickable macOS `.app` bundle (`TradeBot.app`), `.command` script, and `windows-portable/` directory.
+/// Generates clickable macOS `.app` bundle (`TradeBot.app`), `.command` script, `windows-portable/`, and `android-termux/`.
 pub fn package_desktop_app_bundles(
     output_dir: &std::path::Path,
     config_path: &std::path::Path,
@@ -1463,13 +1628,44 @@ pub fn package_desktop_app_bundles(
         let _ = std::fs::copy(".env.example", win_dir.join(".env.example"));
     }
 
-    // Check if cross-compiled Windows trade-bot.exe exists
-    let cross_exe = cwd.join("target/x86_64-pc-windows-gnu/release/trade-bot.exe");
-    let windows_exe_copied = if cross_exe.exists() {
+    // Check if cross-compiled Windows trade-bot.exe exists (MSVC or GNU)
+    let (cross_exe, cross_exe_exists) = resolve_windows_cross_compiled_exe(&cwd);
+    let windows_exe_copied = if cross_exe_exists {
         std::fs::copy(&cross_exe, win_dir.join("trade-bot.exe")).is_ok()
     } else {
         false
     };
+
+    // 3. Create Android (Termux) portable bundle directory
+    let android_dir = output_dir.join("android-termux");
+    std::fs::create_dir_all(&android_dir).map_err(|e| DomainError::StateError {
+        message: format!("Failed to create {}: {}", android_dir.display(), e),
+    })?;
+
+    for (filename, content) in build_android_termux_scripts() {
+        let script_path = android_dir.join(filename);
+        std::fs::write(&script_path, content).map_err(|e| DomainError::StateError {
+            message: format!("Failed to write {}: {}", script_path.display(), e),
+        })?;
+        #[cfg(unix)]
+        if filename.ends_with(".sh") {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&script_path) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o755);
+                let _ = std::fs::set_permissions(&script_path, perms);
+            }
+        }
+    }
+
+    let _ = save_config_file(&android_dir.join("config.json"), &cfg);
+    if std::path::Path::new(".env.example").exists() {
+        let _ = std::fs::copy(".env.example", android_dir.join(".env.example"));
+    }
+    let (android_bin, android_bin_exists) = resolve_android_cross_compiled_bin(&cwd);
+    if android_bin_exists {
+        let _ = std::fs::copy(&android_bin, android_dir.join("trade-bot"));
+    }
 
     Ok(format_cross_compile_instructions(
         windows_exe_copied,
@@ -1482,6 +1678,7 @@ pub fn package_desktop_app_bundles(
 pub async fn execute_cli(cli: Cli) -> Result<String, DomainError> {
     let _ = load_dotenv_file(std::path::Path::new(".env"));
     let command = cli.command.unwrap_or(Commands::Gui {
+        host: "0.0.0.0".to_string(),
         port: 8787,
         no_open: false,
     });
@@ -1734,12 +1931,16 @@ pub async fn execute_cli(cli: Cli) -> Result<String, DomainError> {
             Ok(answer_ai_query(&question, &cfg, &store).await)
         }
 
-        Commands::Gui { port, no_open } => {
+        Commands::Gui {
+            host,
+            port,
+            no_open,
+        } => {
             let cfg = load_config_file(&cli.config)?;
             if !cli.config.exists() {
                 save_config_file(&cli.config, &cfg)?;
             }
-            run_desktop_gui_server(&cli.config, &cli.worker_id, port, no_open).await
+            run_desktop_gui_server(&cli.config, &cli.worker_id, &host, port, no_open).await
         }
 
         Commands::PackageApp { output_dir } => {
@@ -2548,12 +2749,19 @@ mod tests {
         assert!(out_wizard.contains("Wizard Setup Selesai"));
         assert!(sqlite_cfg_path.exists());
 
-        // 7b. Desktop App GUI HTTP routes
+        // 7b. Desktop App GUI HTTP routes + iOS/Android PWA manifest
         let (st_html, ct_html, html_body) =
             handle_gui_http_request("GET", "/", "", &cfg_path, "default").await;
         assert_eq!(st_html, 200);
         assert!(ct_html.contains("text/html"));
         assert!(html_body.contains("Trade-Bot Desktop App"));
+        assert!(html_body.contains("apple-mobile-web-app-capable"));
+
+        let (st_manifest, ct_manifest, manifest_body) =
+            handle_gui_http_request("GET", "/manifest.json", "", &cfg_path, "default").await;
+        assert_eq!(st_manifest, 200);
+        assert!(ct_manifest.contains("application/manifest+json"));
+        assert!(manifest_body.contains("\"display\":\"standalone\""));
 
         let (st_api, _, api_body) =
             handle_gui_http_request("GET", "/api/status", "", &cfg_path, "default").await;
@@ -2597,7 +2805,7 @@ mod tests {
             handle_gui_http_request("GET", "/unknown", "", &cfg_path, "default").await;
         assert_eq!(st_404, 404);
 
-        // 7c. PackageApp (macOS .app bundle + Windows portable directory)
+        // 7c. PackageApp (macOS .app bundle + Windows portable directory + Android Termux directory)
         let dist_dir = temp_dir.join("dist_test");
         let out_pkg = execute_cli(Cli {
             config: cfg_path.clone(),
@@ -2608,16 +2816,21 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(out_pkg.contains("PAKET APLIKASI DESKTOP BERHASIL DIBUAT"));
+        assert!(out_pkg.contains("PAKET APLIKASI DESKTOP & MOBILE BERHASIL DIBUAT"));
         assert!(dist_dir.join("TradeBot.app/Contents/Info.plist").exists());
         assert!(dist_dir.join("TradeBot.app/Contents/MacOS/TradeBot").exists());
         assert!(dist_dir.join("Start-TradeBot-Mac.command").exists());
         assert!(dist_dir.join("windows-portable/Start-TradeBot-GUI.bat").exists());
         assert!(dist_dir.join("windows-portable/config.json").exists());
+        assert!(dist_dir.join("android-termux/setup-termux.sh").exists());
+        assert!(dist_dir.join("android-termux/start-daemon-android.sh").exists());
+        assert!(dist_dir.join("android-termux/start-gui-android.sh").exists());
+        assert!(dist_dir.join("android-termux/stop-daemon-android.sh").exists());
+        assert!(dist_dir.join("android-termux/README-ANDROID.md").exists());
 
         let copied_msg = format_cross_compile_instructions(
             true,
-            std::path::Path::new("target/x86_64-pc-windows-gnu/release/trade-bot.exe"),
+            std::path::Path::new("target/x86_64-pc-windows-msvc/release/trade-bot.exe"),
             &dist_dir,
         );
         assert!(copied_msg.contains("berhasil disalin"));
@@ -2683,5 +2896,58 @@ mod tests {
 
         let stopped_frame = format_live_dashboard_frame(&cfg, &state, None, &[], 1, 12_000);
         assert!(stopped_frame.contains("[STOPPED]"));
+    }
+
+    #[test]
+    fn should_resolve_windows_and_android_binaries_and_generate_termux_scripts() {
+        let root = std::env::temp_dir().join(format!(
+            "trade-bot-cross-resolve-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(1)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // 1. Missing binaries return default paths with false
+        let (win_default, win_found) = resolve_windows_cross_compiled_exe(&root);
+        assert!(!win_found);
+        assert!(win_default.ends_with("target/x86_64-pc-windows-msvc/release/trade-bot.exe"));
+
+        let (and_default, and_found) = resolve_android_cross_compiled_bin(&root);
+        assert!(!and_found);
+        assert!(and_default.ends_with("target/aarch64-linux-android/release/trade-bot"));
+
+        // 2. GNU Windows target found when MSVC missing
+        let gnu_exe = root.join("target/x86_64-pc-windows-gnu/release/trade-bot.exe");
+        std::fs::create_dir_all(gnu_exe.parent().unwrap()).unwrap();
+        std::fs::write(&gnu_exe, b"MZ-gnu").unwrap();
+        let (win_gnu, win_gnu_found) = resolve_windows_cross_compiled_exe(&root);
+        assert!(win_gnu_found);
+        assert_eq!(win_gnu, gnu_exe);
+
+        // 3. MSVC Windows target takes priority when both exist
+        let msvc_exe = root.join("target/x86_64-pc-windows-msvc/release/trade-bot.exe");
+        std::fs::create_dir_all(msvc_exe.parent().unwrap()).unwrap();
+        std::fs::write(&msvc_exe, b"MZ-msvc").unwrap();
+        let (win_msvc, win_msvc_found) = resolve_windows_cross_compiled_exe(&root);
+        assert!(win_msvc_found);
+        assert_eq!(win_msvc, msvc_exe);
+
+        // 4. Android ARM64 target found
+        let android_bin = root.join("target/aarch64-linux-android/release/trade-bot");
+        std::fs::create_dir_all(android_bin.parent().unwrap()).unwrap();
+        std::fs::write(&android_bin, b"ELF-android").unwrap();
+        let (and_path, and_ok) = resolve_android_cross_compiled_bin(&root);
+        assert!(and_ok);
+        assert_eq!(and_path, android_bin);
+
+        // 5. Termux scripts contain wake-lock and daemon/gui commands
+        let scripts = build_android_termux_scripts();
+        assert_eq!(scripts.len(), 5);
+        assert!(scripts
+            .iter()
+            .any(|(name, body)| *name == "start-daemon-android.sh"
+                && body.contains("termux-wake-lock")));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -317,11 +317,16 @@ RUST_LOG=info
 ./target/release/trade-bot logs -n 50
 ./target/release/trade-bot logs -f
 
-# 6. Menjalankan Desktop App GUI Visual (atau cukup Double-Click trade-bot.exe tanpa argumen)
-./target/release/trade-bot gui --port 8787
+# 6. Menjalankan Desktop & Mobile Web App GUI Visual (atau cukup Double-Click trade-bot.exe tanpa argumen)
+#    (Otomatis mendukung iPhone Safari & Android Chrome di Wi-Fi yang sama: Add to Home Screen)
+./target/release/trade-bot gui --host 0.0.0.0 --port 8787
 
-# 6b. Membungkus Aplikasi Klik-Ganda macOS (dist/TradeBot.app) & Paket Portable Windows (dist/windows-portable/)
+# 6b. Membungkus Aplikasi Klik-Ganda macOS (dist/TradeBot.app), Paket Portable Windows (dist/windows-portable/),
+#     & Paket Portable Android 24/7 Termux (dist/android-termux/)
+#     Untuk build .exe Windows dari macOS terlebih dahulu:
+#       cargo xwin build --release --target x86_64-pc-windows-msvc
 ./target/release/trade-bot package-app
+#     Lihat panduan lengkap instalasi 24 jam di Android & iPhone pada file: ANDROID_GUIDE.md
 
 # 7. Tanya langsung ke AI seputar data trading bot, log, & skills (/query)
 ./target/release/trade-bot query "kenapa siklus terakhir belum beli?"
