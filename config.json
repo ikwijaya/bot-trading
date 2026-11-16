@@ -30,9 +30,9 @@
     "require_positive_ev": true
   },
   "ai": {
-    "enabled": false,
-    "endpoint_url": "https://api.openai.com/v1/chat/completions",
-    "model": "gpt-4o-mini",
+    "enabled": true,
+    "endpoint_url": "https://api.deepseek.com/chat/completions",
+    "model": "deepseek-chat",
     "api_key_env": "AI_API_KEY",
     "system_prompt_env": "AI_SYSTEM_PROMPT",
     "weight": 0.35

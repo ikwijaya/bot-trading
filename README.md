@@ -325,7 +325,13 @@ RUST_LOG=info
 #     & Paket Portable Android 24/7 Termux (dist/android-termux/)
 #     Untuk build .exe Windows dari macOS terlebih dahulu:
 #       cargo xwin build --release --target x86_64-pc-windows-msvc
+#     (Opsional, tapi sangat disarankan) Cross-compile Android ARM64 agar
+#     dist/android-termux/trade-bot ikut terisi (folder jadi self-contained, user tidak perlu build di HP):
+#       cargo install cargo-ndk && rustup target add aarch64-linux-android
+#       export ANDROID_NDK_HOME=/opt/homebrew/share/android-ndk   # sesuaikan path NDK Anda
+#       cargo ndk -t arm64-v8a build --release
 ./target/release/trade-bot package-app
+#     Lalu zip & transfer: cd dist && zip -r android-termux.zip android-termux
 #     Lihat panduan lengkap instalasi 24 jam di Android & iPhone pada file: ANDROID_GUIDE.md
 
 # 7. Tanya langsung ke AI seputar data trading bot, log, & skills (/query)

@@ -1431,15 +1431,32 @@ pub fn build_android_termux_scripts() -> Vec<(&'static str, &'static str)> {
             "setup-termux.sh",
             "#!/data/data/com.termux/files/usr/bin/bash\n\
              set -e\n\
+             cd \"$(dirname \"$0\")\" || exit 1\n\
              echo \"=== [Trade-Bot Android Termux Setup] ===\"\n\
-             pkg update -y && pkg upgrade -y\n\
-             pkg install -y rust clang make git pkg-config termux-api\n\
-             if [ -f \"Cargo.toml\" ]; then\n\
-               echo \"Mem-build binary trade-bot langsung di Termux Android...\"\n\
+             \n\
+             # Pasang termux-api untuk wake-lock (selalu diperlukan untuk mode 24/7)\n\
+             pkg update -y\n\
+             pkg install -y termux-api\n\
+             \n\
+             if [ -x \"./trade-bot\" ]; then\n\
+               echo \"✅ Binary ./trade-bot sudah tersedia (pre-staged dari dev machine). Skip build.\"\n\
+               chmod +x ./trade-bot ./*.sh 2>/dev/null || true\n\
+             elif [ -f \"Cargo.toml\" ]; then\n\
+               echo \"ℹ️  Binary belum ada. Fallback: build dari source on-device (~5-15 menit)...\"\n\
+               pkg install -y rust clang make git pkg-config\n\
                cargo build --release\n\
                cp target/release/trade-bot ./trade-bot\n\
+               chmod +x ./trade-bot ./*.sh 2>/dev/null || true\n\
+             else\n\
+               echo \"❌ ERROR: Binary ./trade-bot tidak ada dan Cargo.toml juga tidak ada di folder ini.\"\n\
+               echo \"   Lakukan cross-compile di laptop dev dulu:\"\n\
+               echo \"     cargo install cargo-ndk && rustup target add aarch64-linux-android\"\n\
+               echo \"     cargo ndk -t arm64-v8a build --release\"\n\
+               echo \"     ./target/release/trade-bot package-app\"\n\
+               echo \"   Lalu zip ulang dan transfer dist/android-termux/ ke HP.\"\n\
+               exit 1\n\
              fi\n\
-             chmod +x ./trade-bot ./*.sh 2>/dev/null || true\n\
+             \n\
              echo \"✅ Setup selesai! Jalankan ./start-daemon-android.sh untuk menyalakan bot 24 jam.\"\n",
         ),
         (
@@ -1490,12 +1507,29 @@ pub fn build_android_termux_scripts() -> Vec<(&'static str, &'static str)> {
             "README-ANDROID.md",
             "# Panduan Singkat Trade-Bot di Android (Termux 24/7)\n\n\
              Lihat panduan lengkap langkah-demi-langkah di file `ANDROID_GUIDE.md`.\n\n\
-             ## Langkah Cepat di Termux Android:\n\
+             Folder ini **self-contained**: jika binary `./trade-bot` (ARM64 ELF) sudah pre-staged \
+             dari laptop dev, Anda cukup unzip & jalankan — tidak perlu build apa pun di HP.\n\n\
+             ## Mode A (Rekomendasi): Binary Pre-Built dari Laptop Dev\n\
+             Di laptop macOS/Linux dev (sekali saja):\n\
+             ```bash\n\
+             cargo install cargo-ndk\n\
+             rustup target add aarch64-linux-android\n\
+             # export ANDROID_NDK_HOME=/path/to/android-ndk    # sesuaikan\n\
+             cargo ndk -t arm64-v8a build --release\n\
+             ./target/release/trade-bot package-app\n\
+             # Hasil: dist/android-termux/trade-bot (ARM64 ELF) sudah ter-copy otomatis.\n\
+             cd dist && zip -r android-termux.zip android-termux\n\
+             ```\n\
+             Transfer `android-termux.zip` ke HP, unzip di Termux, lalu langkah di HP:\n\
              1. Pastikan izin baterai aplikasi **Termux** disetel ke **Unrestricted / Jangan Optimalkan**.\n\
-             2. Jalankan `bash setup-termux.sh` (hanya perlu sekali saat pertama kali).\n\
+             2. `cd android-termux && bash setup-termux.sh` (otomatis deteksi binary, skip build).\n\
              3. Salin `.env.example` ke `.env` dan isi API Key serta `TELEGRAM_BOT_TOKEN`.\n\
-             4. Jalankan `./start-daemon-android.sh` untuk menyalakan worker 24 jam dengan `termux-wake-lock`.\n\
-             5. Jalankan `./start-gui-android.sh` untuk membuka Dashboard Web App di Chrome Android (`http://127.0.0.1:8787`).\n",
+             4. `./start-daemon-android.sh` untuk menyalakan worker 24 jam dengan `termux-wake-lock`.\n\
+             5. `./start-gui-android.sh` untuk membuka Dashboard Web App di Chrome Android (`http://127.0.0.1:8787`).\n\n\
+             ## Mode B (Fallback): Build On-Device\n\
+             Jika dev machine Anda tidak punya NDK, salin seluruh repo (termasuk `Cargo.toml` + `src/`) \
+             ke HP, lalu `bash setup-termux.sh` akan otomatis `pkg install rust clang` + `cargo build --release` \
+             on-device (~5-15 menit). Selebihnya sama dengan langkah 3-5 di atas.\n",
         ),
     ]
 }
@@ -1504,6 +1538,8 @@ pub fn build_android_termux_scripts() -> Vec<(&'static str, &'static str)> {
 pub fn format_cross_compile_instructions(
     windows_exe_copied: bool,
     windows_exe_source: &std::path::Path,
+    android_bin_copied: bool,
+    android_bin_source: &std::path::Path,
     output_dir: &std::path::Path,
 ) -> String {
     let win_status = if windows_exe_copied {
@@ -1526,6 +1562,29 @@ pub fn format_cross_compile_instructions(
         )
     };
 
+    let android_status = if android_bin_copied {
+        format!(
+            "✅ Binary Android ARM64 ditemukan di `{}` dan berhasil disalin ke `{}/android-termux/trade-bot`!\n   \
+             Folder `{}/android-termux/` sekarang **self-contained** — zip & transfer saja ke HP, lalu `bash setup-termux.sh` otomatis skip build.",
+            android_bin_source.display(),
+            output_dir.display(),
+            output_dir.display()
+        )
+    } else {
+        format!(
+            "ℹ️ Binary Android ARM64 belum di-cross-compile (belum ada di `{}`).\n   \
+             Untuk menghasilkan binary ARM64 Android langsung dari macOS/Linux dev:\n   \
+             • Install prasyarat (sekali saja):\n     \
+               cargo install cargo-ndk && rustup target add aarch64-linux-android\n     \
+               (pastikan Android NDK terpasang & env var `ANDROID_NDK_HOME` ter-set)\n   \
+             • Cross-compile:\n     \
+               cargo ndk -t arm64-v8a build --release\n   \
+             Lalu jalankan ulang `./target/release/trade-bot package-app` agar `trade-bot` otomatis masuk ke `{}/android-termux/` dan folder jadi self-contained.",
+            android_bin_source.display(),
+            output_dir.display()
+        )
+    };
+
     format!(
         "========================================================================\n\
          📦  PAKET APLIKASI DESKTOP & MOBILE BERHASIL DIBUAT DI: {out}\n\
@@ -1540,18 +1599,23 @@ pub fn format_cross_compile_instructions(
             - Check-Config.bat                (Validasi config & .env di Windows)\n\
             - config.json & .env.example\n\n\
          🤖 [3] Paket Portable Android 24/7 ({out}/android-termux/ & ANDROID_GUIDE.md):\n\
-            - setup-termux.sh                 (Instalasi otomatis Rust/Clang & build di Termux Android)\n\
+            - setup-termux.sh                 (Auto-detect pre-staged binary; fallback build on-device bila perlu)\n\
             - start-daemon-android.sh         (Menyalakan daemon 24 jam + `termux-wake-lock`)\n\
             - start-gui-android.sh            (Membuka GUI di Chrome Android `http://127.0.0.1:8787`)\n\
-            - stop-daemon-android.sh          (Menghentikan daemon & melepas wake-lock)\n\n\
+            - stop-daemon-android.sh          (Menghentikan daemon & melepas wake-lock)\n\
+            - trade-bot                       (Binary ARM64 Android ELF — ada jika sudah cross-compile dengan `cargo ndk -t arm64-v8a build --release`)\n\
+            - config.json & .env.example\n\n\
          📱 [4] Aplikasi iPhone (iOS Full-Screen Web App / PWA):\n\
             - Buka `http://<IP-Mac-atau-PC-Anda>:8787` di Safari iPhone\n\
             - Tap tombol Share -> Add to Home Screen (Tambahkan ke Layar Utama)\n\n\
          🔧 [5] Status Binary Windows (.exe) dari macOS:\n\
-         {win_status}\n\
+         {win_status}\n\n\
+         🔧 [6] Status Binary Android (ARM64 ELF) dari macOS:\n\
+         {android_status}\n\
          ========================================================================",
         out = output_dir.display(),
-        win_status = win_status
+        win_status = win_status,
+        android_status = android_status
     )
 }
 
@@ -1670,6 +1734,8 @@ pub fn package_desktop_app_bundles(
     Ok(format_cross_compile_instructions(
         windows_exe_copied,
         &cross_exe,
+        android_bin_exists,
+        &android_bin,
         output_dir,
     ))
 }
@@ -2831,9 +2897,22 @@ mod tests {
         let copied_msg = format_cross_compile_instructions(
             true,
             std::path::Path::new("target/x86_64-pc-windows-msvc/release/trade-bot.exe"),
+            true,
+            std::path::Path::new("target/aarch64-linux-android/release/trade-bot"),
             &dist_dir,
         );
         assert!(copied_msg.contains("berhasil disalin"));
+        assert!(copied_msg.contains("self-contained"));
+
+        let missing_msg = format_cross_compile_instructions(
+            false,
+            std::path::Path::new("target/x86_64-pc-windows-msvc/release/trade-bot.exe"),
+            false,
+            std::path::Path::new("target/aarch64-linux-android/release/trade-bot"),
+            &dist_dir,
+        );
+        assert!(missing_msg.contains("cargo ndk -t arm64-v8a"));
+        assert!(missing_msg.contains("cargo install cargo-ndk"));
 
         // 8. Telegram command handlers (with disabled Telegram adapter so no network call is made)
         let store = Arc::new(JsonStateStore::new(&cfg.data_dir));
@@ -2947,6 +3026,57 @@ mod tests {
             .iter()
             .any(|(name, body)| *name == "start-daemon-android.sh"
                 && body.contains("termux-wake-lock")));
+
+        // 6. setup-termux.sh prioritizes pre-staged binary, falls back to on-device build,
+        //    and prints the cargo-ndk cross-compile instructions when neither is present.
+        let setup = scripts
+            .iter()
+            .find(|(n, _)| *n == "setup-termux.sh")
+            .map(|(_, body)| *body)
+            .unwrap();
+        assert!(setup.contains("if [ -x \"./trade-bot\" ]"));
+        assert!(setup.contains("Skip build"));
+        assert!(setup.contains("elif [ -f \"Cargo.toml\" ]"));
+        assert!(setup.contains("cargo ndk -t arm64-v8a build --release"));
+        assert!(setup.contains("cargo install cargo-ndk"));
+
+        // 7. README-ANDROID.md documents both Mode A (pre-built) and Mode B (on-device build).
+        let readme_android = scripts
+            .iter()
+            .find(|(n, _)| *n == "README-ANDROID.md")
+            .map(|(_, body)| *body)
+            .unwrap();
+        assert!(readme_android.contains("Mode A"));
+        assert!(readme_android.contains("Mode B"));
+        assert!(readme_android.contains("cargo ndk -t arm64-v8a"));
+
+        // 8. format_cross_compile_instructions reports Android status (both success & fallback paths).
+        let out_dir = root.join("dist");
+        let ok_msg = format_cross_compile_instructions(
+            true,
+            &msvc_exe,
+            true,
+            &android_bin,
+            &out_dir,
+        );
+        assert!(ok_msg.contains("Binary Android ARM64 ditemukan"));
+        assert!(ok_msg.contains("self-contained"));
+
+        let empty_root = std::env::temp_dir().join(format!(
+            "trade-bot-missing-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(2)
+        ));
+        let (_, _) = resolve_android_cross_compiled_bin(&empty_root);
+        let miss_msg = format_cross_compile_instructions(
+            false,
+            &empty_root.join("target/x86_64-pc-windows-msvc/release/trade-bot.exe"),
+            false,
+            &empty_root.join("target/aarch64-linux-android/release/trade-bot"),
+            &out_dir,
+        );
+        assert!(miss_msg.contains("belum di-cross-compile"));
+        assert!(miss_msg.contains("cargo ndk -t arm64-v8a build --release"));
+        assert!(miss_msg.contains("ANDROID_NDK_HOME"));
 
         let _ = std::fs::remove_dir_all(&root);
     }
